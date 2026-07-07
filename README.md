@@ -1,0 +1,2 @@
+# FlipTrader-
+Trading app
