@@ -5,8 +5,11 @@ import { analyzeCandles } from './helpers/indicators'
 import { isMarketOpen } from './helpers/marketHours'
 import { sendToTopic } from './helpers/firebase-notify'
 import { ALERTS_TOPIC } from '../register-token'
+import { verifyCronSecret } from './helpers/verifyCronSecret'
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (!verifyCronSecret(req, res)) return
+
   try {
     if (!isMarketOpen()) {
       return res.status(200).json({ success: true, skipped: true, reason: 'market closed' })

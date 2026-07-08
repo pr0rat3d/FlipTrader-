@@ -4,6 +4,7 @@ import { calculateRSI } from '../../src/lib/technicalIndicators'
 import { getDailyCloses } from './helpers/twelvedata'
 import { sendToTopic } from './helpers/firebase-notify'
 import { ALERTS_TOPIC } from '../register-token'
+import { verifyCronSecret } from './helpers/verifyCronSecret'
 
 // Capped at 8 symbols: Twelve Data's free tier allows 8 API credits/minute,
 // and this loop fires sequentially with no throttling.
@@ -23,6 +24,8 @@ const SECTORS: { [key: string]: string } = {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (!verifyCronSecret(req, res)) return
+
   try {
     const oversoldAlerts = []
 

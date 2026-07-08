@@ -1,8 +1,11 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from './helpers/supabaseAdmin'
 import { getQuote } from './helpers/finnhub'
+import { verifyCronSecret } from './helpers/verifyCronSecret'
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (!verifyCronSecret(req, res)) return
+
   try {
     // Get all open profit targets
     const { data: targets, error: targetError } = await supabase
