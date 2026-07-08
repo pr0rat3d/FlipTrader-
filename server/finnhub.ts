@@ -20,6 +20,13 @@ export interface SymbolMatch {
   description: string
 }
 
+// Finnhub's own data occasionally lists the same symbol twice with different
+// description casing (e.g. "KEEL INFRASTRUCTURE CORP" and "Keel Infrastructure
+// Corp") - title-case ALL-CAPS descriptions for consistency and display them
+// as one entry per symbol.
+const titleCase = (s: string): string =>
+  /[a-z]/.test(s) ? s : s.replace(/\w\S*/g, w => w.charAt(0) + w.slice(1).toLowerCase())
+
 // US-listed stocks/ETFs only - drop exchange-suffixed symbols (e.g. "SPY.AX")
 // since Twelve Data's calls elsewhere in this app assume plain US tickers.
 export const searchSymbols = async (query: string): Promise<SymbolMatch[]> => {
@@ -31,10 +38,19 @@ export const searchSymbols = async (query: string): Promise<SymbolMatch[]> => {
     const results = response.data?.result
     if (!Array.isArray(results)) return []
 
-    return results
-      .filter((r: any) => (r.type === 'Common Stock' || r.type === 'ETP') && !r.symbol.includes('.'))
-      .slice(0, 10)
-      .map((r: any) => ({ symbol: r.symbol, description: r.description }))
+    const seen = new Set<string>()
+    const matches: SymbolMatch[] = []
+
+    for (const r of results) {
+      if (r.type !== 'Common Stock' && r.type !== 'ETP') continue
+      if (r.symbol.includes('.')) continue
+      if (seen.has(r.symbol)) continue
+      seen.add(r.symbol)
+      matches.push({ symbol: r.symbol, description: titleCase(r.description) })
+      if (matches.length >= 10) break
+    }
+
+    return matches
   } catch (error) {
     console.error(`Error searching symbols for "${query}":`, error)
     return []
