@@ -4,21 +4,21 @@ import { useAuth } from '../hooks/useAuth'
 import { getTrackedSymbols, getWatchlist } from '../lib/supabase'
 import { IndicatorSnapshot } from '../types'
 
-// Dark-mode categorical slots, validated against this app's card surface (#1f2937)
-const COLOR_CLOSE = '#3987e5'
-const COLOR_EMA50 = '#199e70'
+// Close is the app's existing bullish green (matches AlertCard.tsx's convention) so
+// the actual price reads as the primary "trend" line; EMAs/VWAP are secondary context.
+const COLOR_CLOSE = '#4ade80'
+const COLOR_EMA50 = '#3987e5'
 const COLOR_EMA200 = '#c98500'
-const COLOR_VWAP = '#008300'
-// This app's existing bullish/bearish convention (AlertCard.tsx) - kept for consistency
+const COLOR_VWAP = '#9085e9'
 const COLOR_BULLISH = '#4ade80'
 const COLOR_BEARISH = '#f87171'
 const COLOR_MUTED = '#898781'
 const COLOR_GRID = '#374151'
 
 const CHART_WIDTH = 600
-const CHART_HEIGHT = 140
-const AXIS_HEIGHT = 18
-const PAD = 10
+const CHART_HEIGHT = 90
+const AXIS_HEIGHT = 16
+const PAD = 8
 
 const xScale = (i: number, n: number) => (n <= 1 ? CHART_WIDTH / 2 : (i / (n - 1)) * (CHART_WIDTH - PAD * 2) + PAD)
 
@@ -90,10 +90,10 @@ const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, 
   const tickIndices = pickTickIndices(n, 4)
 
   return (
-    <div className="p-3 bg-gray-800 rounded mb-3">
-      <div className="flex justify-between items-center mb-2">
+    <div className="p-2 bg-gray-800 rounded mb-2">
+      <div className="flex justify-between items-center mb-1">
         <div>
-          <p className="text-sm font-bold text-white">{title}</p>
+          <p className="text-xs font-bold text-white">{title}</p>
           {subtitle && <p className="text-xs text-gray-400">{subtitle}</p>}
         </div>
         {legend}
@@ -178,8 +178,8 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
         </div>
       }
     >
-      <text x={CHART_WIDTH - PAD} y={PAD + 8} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>${fmt(y.max)}</text>
-      <text x={CHART_WIDTH - PAD} y={CHART_HEIGHT - PAD - 2} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>${fmt(y.min)}</text>
+      <text x={PAD} y={PAD + 8} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>${fmt(y.max)}</text>
+      <text x={PAD} y={CHART_HEIGHT - PAD - 2} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>${fmt(y.min)}</text>
       <path d={linePath(toPoints(ema200s))} fill="none" stroke={COLOR_EMA200} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       <path d={linePath(toPoints(ema50s))} fill="none" stroke={COLOR_EMA50} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       {hasVwap && (
@@ -214,8 +214,8 @@ const RSIChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (
     >
       <line x1={PAD} x2={CHART_WIDTH - PAD} y1={y(70)} y2={y(70)} stroke={COLOR_GRID} strokeWidth={1} />
       <line x1={PAD} x2={CHART_WIDTH - PAD} y1={y(30)} y2={y(30)} stroke={COLOR_GRID} strokeWidth={1} />
-      <text x={CHART_WIDTH - PAD} y={y(70) - 3} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>70</text>
-      <text x={CHART_WIDTH - PAD} y={y(30) - 3} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>30</text>
+      <text x={PAD} y={y(70) - 3} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>70</text>
+      <text x={PAD} y={y(30) - 3} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>30</text>
       <path d={linePath(points)} fill="none" stroke={COLOR_CLOSE} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       {n > 0 && Number.isFinite(rsis[n - 1]) && (
         <circle cx={xScale(n - 1, n)} cy={y(rsis[n - 1])} r={4} fill={COLOR_CLOSE} stroke="#1f2937" strokeWidth={2} />
@@ -262,9 +262,9 @@ const MACDChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: 
       }
     >
       <line x1={PAD} x2={CHART_WIDTH - PAD} y1={zeroY} y2={zeroY} stroke={COLOR_GRID} strokeWidth={1} />
-      <text x={CHART_WIDTH - PAD} y={PAD + 8} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>{fmt(maxAbs, 3)}</text>
-      <text x={CHART_WIDTH - PAD} y={zeroY - 3} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>0</text>
-      <text x={CHART_WIDTH - PAD} y={CHART_HEIGHT - PAD - 2} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>-{fmt(maxAbs, 3)}</text>
+      <text x={PAD + barWidth + 4} y={PAD + 8} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>{fmt(maxAbs, 3)}</text>
+      <text x={PAD + barWidth + 4} y={zeroY - 3} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>0</text>
+      <text x={PAD + barWidth + 4} y={CHART_HEIGHT - PAD - 2} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>-{fmt(maxAbs, 3)}</text>
       {hist.map((v, i) => {
         if (!Number.isFinite(v)) return null
         const x = xScale(i, n) - barWidth / 2
@@ -321,7 +321,11 @@ export const Indicators: React.FC = () => {
     return () => { cancelled = true }
   }, [user, category])
 
-  const symbols = showMyWatchlistOnly ? myWatchlist : trackedSymbols
+  // Followed symbols always show up, even before the cron has scanned them yet -
+  // otherwise a user who just added a ticker sees nothing and assumes it's broken.
+  const symbols = showMyWatchlistOnly
+    ? myWatchlist
+    : Array.from(new Set([...trackedSymbols, ...myWatchlist])).sort()
 
   useEffect(() => {
     if (symbols.length > 0 && !symbols.includes(selectedSymbol)) {
@@ -389,21 +393,28 @@ export const Indicators: React.FC = () => {
           <button
             key={sym}
             onClick={() => selectSymbol(sym)}
+            title={myWatchlist.includes(sym) ? 'On your watchlist' : undefined}
             className={`px-3 py-1 rounded text-sm font-bold ${selectedSymbol === sym ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-400'}`}
           >
-            {sym}
+            {sym}{myWatchlist.includes(sym) && ' ★'}
           </button>
         ))}
       </div>
 
       {loading && <p className="text-gray-400">Loading indicator history...</p>}
 
-      {!loading && snapshots.length === 0 && (
+      {!loading && snapshots.length === 0 && selectedSymbol && (
         <p className="text-gray-400">No indicator history yet for {selectedSymbol}. It'll start filling in as cron runs occur.</p>
       )}
 
       {!loading && snapshots.length > 0 && (
         <>
+          <div className="flex justify-between items-center mb-2" style={{ borderBottom: '1px solid #374151', paddingBottom: 8 }}>
+            <h3 className="text-xl font-bold text-white">
+              {selectedSymbol} <span className="text-sm text-gray-400 font-bold">{category === 'day_trade' ? 'Day Trade' : 'Swing'}</span>
+            </h3>
+            <span className="text-lg font-bold" style={{ color: COLOR_CLOSE }}>${fmt(snapshots[snapshots.length - 1]?.close_price)}</span>
+          </div>
           <PriceChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <RSIChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <MACDChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
