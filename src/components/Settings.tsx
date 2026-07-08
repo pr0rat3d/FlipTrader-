@@ -12,6 +12,7 @@ export const Settings: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!user) {
@@ -48,6 +49,7 @@ export const Settings: React.FC = () => {
     if (!user) return
     setSaving(true)
     setSaved(false)
+    setSaveError(null)
     try {
       await saveUserPreferences(user.id, {
         sector_filters: selectedSectors,
@@ -56,6 +58,7 @@ export const Settings: React.FC = () => {
       setSaved(true)
     } catch (error) {
       console.error('Error saving preferences:', error)
+      setSaveError(error instanceof Error ? error.message : String(error))
     } finally {
       setSaving(false)
     }
@@ -156,6 +159,7 @@ export const Settings: React.FC = () => {
             {saving ? 'Saving...' : 'Save Preferences'}
           </button>
           {saved && <span className="text-sm text-green-400 ml-2">Saved!</span>}
+          {saveError && <p className="text-sm text-red-400 mt-2">Failed to save: {saveError}</p>}
         </>
       )}
     </div>

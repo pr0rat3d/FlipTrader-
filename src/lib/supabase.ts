@@ -86,9 +86,13 @@ export const subscribeToIndicatorSnapshots = (symbol: string, callback: (row: an
 }
 
 export const saveUserPreferences = async (userId: string, preferences: any) => {
+  // onConflict must be explicit: user_preferences' primary key is `id` (a fresh
+  // UUID every insert), not `user_id` - without this, upsert() targets the
+  // primary key by default, never conflicts, and every save after the first
+  // fails with a duplicate-key error on the separate UNIQUE(user_id) constraint.
   const { data, error } = await supabase
     .from('user_preferences')
-    .upsert({ user_id: userId, ...preferences })
+    .upsert({ user_id: userId, ...preferences }, { onConflict: 'user_id' })
     .select()
 
   if (error) throw error
