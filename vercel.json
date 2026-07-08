@@ -1,0 +1,18 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "crons": [
+    {
+      "path": "/api/cron/scan-day-trades",
+      "schedule": "*/5 13-21 * * MON-FRI"
+    },
+    {
+      "path": "/api/cron/scan-swings",
+      "schedule": "0 9 * * MON-FRI"
+    },
+    {
+      "path": "/api/cron/track-profit-targets",
+      "schedule": "* * * * *"
+    }
+  ]
+}
