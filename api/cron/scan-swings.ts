@@ -7,6 +7,7 @@ import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { recordSnapshot } from '../../server/snapshot.js'
 import { pickBatch } from '../../server/batching.js'
+import { getSwingUniverse } from '../../server/swingUniverse.js'
 
 // Twelve Data's free tier allows 8 credits/minute account-wide, shared with
 // scan-day-trades.ts (3 credits, every 5 min during market hours). This job's
@@ -30,27 +31,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
 
   try {
-    const [{ data: prefRows }, { data: followedRows }, { data: universeRows }] = await Promise.all([
-      supabase.from('user_preferences').select('sector_filters'),
-      supabase.from('watchlists').select('symbol').eq('type', 'swing'),
-      supabase.from('sector_universe').select('symbol, sector')
-    ])
-
-    const selectedSectors = new Set<string>()
-    for (const row of prefRows || []) {
-      for (const sector of row.sector_filters || []) selectedSectors.add(sector)
-    }
-
-    const sectorBySymbol: { [symbol: string]: string } = {}
-    for (const row of universeRows || []) {
-      sectorBySymbol[row.symbol] = row.sector
-    }
-
-    const sectorPool = (universeRows || [])
-      .filter(row => selectedSectors.has(row.sector))
-      .map(row => row.symbol)
-
-    const followedPool = Array.from(new Set((followedRows || []).map(r => r.symbol)))
+    const { sectorPool, followedPool, sectorBySymbol } = await getSwingUniverse()
 
     // Reserve slots for followed symbols; backfill unused reservation with sector-pool symbols
     const followedBatch = pickBatch(followedPool, FOLLOWED_RESERVE, BATCH_INTERVAL_MIN)

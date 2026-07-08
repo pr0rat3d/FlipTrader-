@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useIndicatorSnapshots } from '../hooks/useIndicatorSnapshots'
 import { useAuth } from '../hooks/useAuth'
-import { getTrackedSymbols, getWatchlist } from '../lib/supabase'
+import { getActiveUniverse, getWatchlist } from '../lib/supabase'
 import { IndicatorSnapshot } from '../types'
 
 // Close is the app's existing bullish green (matches AlertCard.tsx's convention) so
@@ -305,7 +305,7 @@ export const Indicators: React.FC = () => {
   useEffect(() => {
     let cancelled = false
     setSymbolsLoading(true)
-    getTrackedSymbols(category)
+    getActiveUniverse(category)
       .then(syms => { if (!cancelled) setTrackedSymbols(syms) })
       .catch(console.error)
       .finally(() => { if (!cancelled) setSymbolsLoading(false) })

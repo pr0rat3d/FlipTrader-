@@ -134,14 +134,13 @@ export const removeWatchlistSymbol = async (id: string) => {
   if (error) throw error
 }
 
-export const getTrackedSymbols = async (category: 'day_trade' | 'swing') => {
-  const { data, error } = await supabase
-    .from('indicator_snapshots')
-    .select('symbol')
-    .eq('category', category)
-
-  if (error) throw error
-  return Array.from(new Set((data || []).map(row => row.symbol))).sort()
+// Reflects the CURRENT active scanning universe (sector filters + follows),
+// not just "has ever had a snapshot" - a deselected sector's symbols should
+// disappear from the picker even though their historical rows still exist.
+export const getActiveUniverse = async (category: 'day_trade' | 'swing'): Promise<string[]> => {
+  const response = await fetch(`/api/tracked-universe?category=${category}`)
+  const data = await response.json()
+  return data.symbols || []
 }
 
 export const getSectorUniverse = async () => {
