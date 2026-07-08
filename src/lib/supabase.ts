@@ -94,3 +94,58 @@ export const saveUserPreferences = async (userId: string, preferences: any) => {
   if (error) throw error
   return data
 }
+
+export const getUserPreferences = async (userId: string) => {
+  const { data, error } = await supabase
+    .from('user_preferences')
+    .select('*')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) throw error
+  return data
+}
+
+export const getWatchlist = async (userId: string, type?: 'day_trade' | 'swing') => {
+  let query = supabase.from('watchlists').select('*').eq('user_id', userId)
+  if (type) query = query.eq('type', type)
+
+  const { data, error } = await query.order('created_at', { ascending: false })
+  if (error) throw error
+  return data
+}
+
+export const addWatchlistSymbol = async (userId: string, symbol: string, type: 'day_trade' | 'swing') => {
+  const { data, error } = await supabase
+    .from('watchlists')
+    .insert({ user_id: userId, symbol, type })
+    .select()
+
+  if (error) throw error
+  return data
+}
+
+export const removeWatchlistSymbol = async (id: string) => {
+  const { error } = await supabase.from('watchlists').delete().eq('id', id)
+  if (error) throw error
+}
+
+export const getTrackedSymbols = async (category: 'day_trade' | 'swing') => {
+  const { data, error } = await supabase
+    .from('indicator_snapshots')
+    .select('symbol')
+    .eq('category', category)
+
+  if (error) throw error
+  return Array.from(new Set((data || []).map(row => row.symbol))).sort()
+}
+
+export const getSectorUniverse = async () => {
+  const { data, error } = await supabase
+    .from('sector_universe')
+    .select('*')
+    .order('sector', { ascending: true })
+
+  if (error) throw error
+  return data
+}

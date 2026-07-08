@@ -36,6 +36,8 @@ html, body, #root {
 .mb-6 { margin-bottom: 1.5rem; }
 .pb-20 { padding-bottom: 5rem; }
 .mt-2 { margin-top: 0.5rem; }
+.mr-2 { margin-right: 0.5rem; }
+.ml-2 { margin-left: 0.5rem; }
 .bg-gray-800 { background-color: #1f2937; }
 .bg-gray-700 { background-color: #374151; }
 .bg-gray-900 { background-color: #111827; }

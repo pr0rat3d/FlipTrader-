@@ -3,7 +3,12 @@ import { supabase } from './supabaseAdmin.js'
 
 export type SnapshotCategory = 'day_trade' | 'swing'
 
-export const recordSnapshot = async (symbol: string, category: SnapshotCategory, closes: number[]) => {
+export const recordSnapshot = async (
+  symbol: string,
+  category: SnapshotCategory,
+  closes: number[],
+  vwap: number | null = null
+) => {
   if (closes.length < 26) return
 
   const rsiValues = calculateRSI(closes, 14)
@@ -22,6 +27,7 @@ export const recordSnapshot = async (symbol: string, category: SnapshotCategory,
     macd_histogram: latestMacd?.histogram ?? null,
     ema_50: ema50,
     ema_200: ema200,
+    vwap,
     timestamp: new Date()
   })
 

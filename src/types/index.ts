@@ -67,6 +67,20 @@ export interface IndicatorSnapshot {
   macd_histogram: number | null;
   ema_50: number | null;
   ema_200: number | null;
+  vwap: number | null;
   timestamp: string;
   created_at: string;
+}
+
+export interface Watchlist {
+  id: string;
+  user_id: string;
+  symbol: string;
+  type: 'day_trade' | 'swing';
+  created_at: string;
+}
+
+export interface SectorUniverseRow {
+  symbol: string;
+  sector: string;
 }

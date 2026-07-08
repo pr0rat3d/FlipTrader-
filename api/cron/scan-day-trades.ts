@@ -1,12 +1,21 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from './helpers/supabaseAdmin.js'
-import { getIntradayCloses } from './helpers/twelvedata.js'
+import { getIntradayCandles } from './helpers/twelvedata.js'
 import { analyzeCandles } from './helpers/indicators.js'
 import { isMarketOpen } from './helpers/marketHours.js'
 import { sendToTopic } from './helpers/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from './helpers/verifyCronSecret.js'
 import { recordSnapshot } from './helpers/snapshot.js'
+import { calculateSessionVWAP } from './helpers/vwap.js'
+import { pickBatch } from './helpers/batching.js'
+
+const CONFLUENCE_INDICES = ['SPY', 'QQQ', 'IWM']
+// 3 confluence + 5 followed = 8, exactly Twelve Data's free-tier credits/minute cap.
+// Runs every 5 minutes, so a followed pool bigger than 5 rotates through over time
+// rather than blowing the per-minute budget in a single run.
+const FOLLOWED_BATCH_SIZE = 5
+const BATCH_INTERVAL_MIN = 5
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
@@ -16,7 +25,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ success: true, skipped: true, reason: 'market closed' })
     }
 
-    const indices = ['SPY', 'QQQ', 'IWM']
+    // Followed day-trade tickers get the same snapshot treatment (RSI/MACD/EMA/VWAP)
+    // but are NOT folded into the TTF/DTF/STF confluence logic below, which is
+    // specifically about SPY/QQQ/IWM agreeing with each other.
+    const { data: followedRows } = await supabase
+      .from('watchlists')
+      .select('symbol')
+      .eq('type', 'day_trade')
+
+    const allFollowed = Array.from(new Set((followedRows || []).map(r => r.symbol))).filter(
+      s => !CONFLUENCE_INDICES.includes(s)
+    )
+    const followedSymbols = pickBatch(allFollowed, FOLLOWED_BATCH_SIZE, BATCH_INTERVAL_MIN)
 
     let triggeredIndices: string[] = []
     let rsiDivergence: string | null = null
@@ -24,11 +44,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let entryPrice = 0
     let target50EMA = 0
 
-    for (const symbol of indices) {
-      const closes = await getIntradayCloses(symbol)
-      if (!closes) continue
+    for (const symbol of CONFLUENCE_INDICES) {
+      const candles = await getIntradayCandles(symbol)
+      if (!candles) continue
 
-      await recordSnapshot(symbol, 'day_trade', closes)
+      const closes = candles.map(c => c.close)
+      const vwap = calculateSessionVWAP(candles)
+      await recordSnapshot(symbol, 'day_trade', closes, vwap)
 
       const signal = analyzeCandles(closes)
 
@@ -39,6 +61,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         entryPrice = signal.entryPrice
         target50EMA = signal.target50EMA
       }
+    }
+
+    for (const symbol of followedSymbols) {
+      const candles = await getIntradayCandles(symbol)
+      if (!candles) continue
+
+      const closes = candles.map(c => c.close)
+      const vwap = calculateSessionVWAP(candles)
+      await recordSnapshot(symbol, 'day_trade', closes, vwap)
     }
 
     // If we have signals, create alert
@@ -82,7 +113,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    res.status(200).json({ success: true, indicesTriggered: triggeredIndices })
+    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, followedTracked: followedSymbols })
   } catch (error) {
     console.error('Error in scan-day-trades:', error)
     res.status(500).json({ error: String(error) })

@@ -1,14 +1,14 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useIndicatorSnapshots } from '../hooks/useIndicatorSnapshots'
+import { useAuth } from '../hooks/useAuth'
+import { getTrackedSymbols, getWatchlist } from '../lib/supabase'
 import { IndicatorSnapshot } from '../types'
-
-const DAY_TRADE_SYMBOLS = ['SPY', 'QQQ', 'IWM']
-const SWING_SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'META', 'NFLX']
 
 // Dark-mode categorical slots, validated against this app's card surface (#1f2937)
 const COLOR_CLOSE = '#3987e5'
 const COLOR_EMA50 = '#199e70'
 const COLOR_EMA200 = '#c98500'
+const COLOR_VWAP = '#008300'
 // This app's existing bullish/bearish convention (AlertCard.tsx) - kept for consistency
 const COLOR_BULLISH = '#4ade80'
 const COLOR_BEARISH = '#f87171'
@@ -110,7 +110,9 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
   const closes = snapshots.map(s => s.close_price)
   const ema50s = snapshots.map(s => s.ema_50 ?? NaN)
   const ema200s = snapshots.map(s => s.ema_200 ?? NaN)
-  const y = buildYScale([...closes, ...ema50s, ...ema200s].filter(Number.isFinite))
+  const vwaps = snapshots.map(s => s.vwap ?? NaN)
+  const hasVwap = vwaps.some(Number.isFinite)
+  const y = buildYScale([...closes, ...ema50s, ...ema200s, ...(hasVwap ? vwaps : [])].filter(Number.isFinite))
 
   const toPoints = (vals: number[]) => vals.map((v, i) => (Number.isFinite(v) ? { x: xScale(i, n), y: y(v) } : null))
 
@@ -119,20 +121,24 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
 
   return (
     <ChartFrame
-      title="Price vs EMA50 / EMA200"
+      title={hasVwap ? 'Price vs EMA50 / EMA200 / VWAP' : 'Price vs EMA50 / EMA200'}
       hoveredIndex={hoveredIndex}
       onHover={onHover}
       n={n}
       legend={
-        <div className="flex items-center">
+        <div className="flex items-center" style={{ flexWrap: 'wrap' }}>
           <LegendItem color={COLOR_CLOSE} label="Close" value={`$${fmt(hovered?.close_price)}`} />
           <LegendItem color={COLOR_EMA50} label="EMA50" value={`$${fmt(hovered?.ema_50)}`} />
           <LegendItem color={COLOR_EMA200} label="EMA200" value={`$${fmt(hovered?.ema_200)}`} />
+          {hasVwap && <LegendItem color={COLOR_VWAP} label="VWAP" value={`$${fmt(hovered?.vwap)}`} />}
         </div>
       }
     >
       <path d={linePath(toPoints(ema200s))} fill="none" stroke={COLOR_EMA200} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       <path d={linePath(toPoints(ema50s))} fill="none" stroke={COLOR_EMA50} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      {hasVwap && (
+        <path d={linePath(toPoints(vwaps))} fill="none" stroke={COLOR_VWAP} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      )}
       <path d={linePath(toPoints(closes))} fill="none" stroke={COLOR_CLOSE} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       {n > 0 && Number.isFinite(closes[n - 1]) && (
         <circle cx={xScale(n - 1, n)} cy={y(closes[n - 1])} r={4} fill={COLOR_CLOSE} stroke="#1f2937" strokeWidth={2} />
@@ -235,18 +241,49 @@ const timeLabel = (iso: string) => {
 }
 
 export const Indicators: React.FC = () => {
+  const { user } = useAuth()
   const [category, setCategory] = useState<'day_trade' | 'swing'>('day_trade')
-  const symbols = category === 'day_trade' ? DAY_TRADE_SYMBOLS : SWING_SYMBOLS
-  const [selectedSymbol, setSelectedSymbol] = useState(symbols[0])
+  const [trackedSymbols, setTrackedSymbols] = useState<string[]>([])
+  const [myWatchlist, setMyWatchlist] = useState<string[]>([])
+  const [showMyWatchlistOnly, setShowMyWatchlistOnly] = useState(false)
+  const [selectedSymbol, setSelectedSymbol] = useState('')
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
   const [showTable, setShowTable] = useState(false)
+  const [symbolsLoading, setSymbolsLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setSymbolsLoading(true)
+    getTrackedSymbols(category)
+      .then(syms => { if (!cancelled) setTrackedSymbols(syms) })
+      .catch(console.error)
+      .finally(() => { if (!cancelled) setSymbolsLoading(false) })
+    return () => { cancelled = true }
+  }, [category])
+
+  useEffect(() => {
+    if (!user) { setMyWatchlist([]); setShowMyWatchlistOnly(false); return }
+    let cancelled = false
+    getWatchlist(user.id, category)
+      .then(rows => { if (!cancelled) setMyWatchlist((rows || []).map(r => r.symbol)) })
+      .catch(console.error)
+    return () => { cancelled = true }
+  }, [user, category])
+
+  const symbols = showMyWatchlistOnly ? myWatchlist : trackedSymbols
+
+  useEffect(() => {
+    if (symbols.length > 0 && !symbols.includes(selectedSymbol)) {
+      setSelectedSymbol(symbols[0])
+      setHoveredIndex(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbols.join(',')])
 
   const { snapshots, loading } = useIndicatorSnapshots(selectedSymbol)
 
   const selectCategory = (next: 'day_trade' | 'swing') => {
     setCategory(next)
-    const nextSymbols = next === 'day_trade' ? DAY_TRADE_SYMBOLS : SWING_SYMBOLS
-    setSelectedSymbol(nextSymbols[0])
     setHoveredIndex(null)
   }
 
@@ -274,7 +311,26 @@ export const Indicators: React.FC = () => {
         >
           Swing
         </button>
+        {user && (
+          <label className="flex items-center text-sm text-gray-400 cursor-pointer" style={{ marginLeft: 8 }}>
+            <input
+              type="checkbox"
+              checked={showMyWatchlistOnly}
+              onChange={(e) => setShowMyWatchlistOnly(e.target.checked)}
+              className="mr-2"
+            />
+            My Watchlist only
+          </label>
+        )}
       </div>
+
+      {!symbolsLoading && symbols.length === 0 && (
+        <p className="text-gray-400 mb-4">
+          {showMyWatchlistOnly
+            ? "You haven't followed any tickers in this category yet."
+            : 'No symbols tracked in this category yet.'}
+        </p>
+      )}
 
       <div className="flex gap-2 mb-4" style={{ flexWrap: 'wrap' }}>
         {symbols.map(sym => (
@@ -316,7 +372,7 @@ export const Indicators: React.FC = () => {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    {['Time', 'Close', 'RSI', 'MACD Hist', 'EMA50', 'EMA200'].map(h => (
+                    {['Time', 'Close', 'RSI', 'MACD Hist', 'EMA50', 'EMA200', 'VWAP'].map(h => (
                       <th key={h} className="text-xs text-gray-400" style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #374151' }}>
                         {h}
                       </th>
@@ -332,6 +388,7 @@ export const Indicators: React.FC = () => {
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>{fmt(row.macd_histogram, 3)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(row.ema_50)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(row.ema_200)}</td>
+                      <td className="text-xs text-white" style={{ padding: '4px 8px' }}>{row.vwap !== null ? `$${fmt(row.vwap)}` : '—'}</td>
                     </tr>
                   ))}
                 </tbody>
