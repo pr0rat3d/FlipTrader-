@@ -1,4 +1,4 @@
-import { calculateRSI, calculateMACD, calculateEMA } from '../../../src/lib/technicalIndicators.js'
+import { calculateRSI, calculateMACD, calculateEMA } from '../src/lib/technicalIndicators.js'
 import { supabase } from './supabaseAdmin.js'
 
 export type SnapshotCategory = 'day_trade' | 'swing'

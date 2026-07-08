@@ -1,12 +1,12 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
-import { supabase } from './helpers/supabaseAdmin.js'
+import { supabase } from '../../server/supabaseAdmin.js'
 import { calculateRSI } from '../../src/lib/technicalIndicators.js'
-import { getDailyCloses } from './helpers/twelvedata.js'
-import { sendToTopic } from './helpers/firebase-notify.js'
+import { getDailyCloses } from '../../server/twelvedata.js'
+import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
-import { verifyCronSecret } from './helpers/verifyCronSecret.js'
-import { recordSnapshot } from './helpers/snapshot.js'
-import { pickBatch } from './helpers/batching.js'
+import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordSnapshot } from '../../server/snapshot.js'
+import { pickBatch } from '../../server/batching.js'
 
 // Twelve Data's free tier allows 8 credits/minute account-wide, shared with
 // scan-day-trades.ts (3 credits, every 5 min during market hours). This job's

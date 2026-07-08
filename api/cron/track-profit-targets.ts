@@ -1,7 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
-import { supabase } from './helpers/supabaseAdmin.js'
-import { getQuote } from './helpers/finnhub.js'
-import { verifyCronSecret } from './helpers/verifyCronSecret.js'
+import { supabase } from '../../server/supabaseAdmin.js'
+import { getQuote } from '../../server/finnhub.js'
+import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return

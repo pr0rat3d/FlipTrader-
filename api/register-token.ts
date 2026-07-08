@@ -1,5 +1,5 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
-import { subscribeToTopic } from './cron/helpers/firebase-notify.js'
+import { subscribeToTopic } from '../server/firebase-notify.js'
 
 export const ALERTS_TOPIC = 'all-alerts'
 
