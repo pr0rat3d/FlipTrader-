@@ -66,6 +66,35 @@ const linePath = (points: Array<{ x: number; y: number } | null>): string => {
   return d
 }
 
+interface TooltipRow {
+  label: string
+  value: string
+  color: string
+}
+
+const HoverTooltip: React.FC<{ x: number; timeLabel: string; rows: TooltipRow[] }> = ({ x, timeLabel, rows }) => {
+  const width = 118
+  const rowHeight = 11
+  const height = 14 + rows.length * rowHeight
+  const flip = x > CHART_WIDTH - width - 14
+  const boxX = flip ? x - width - 8 : x + 8
+  const boxY = 2
+
+  return (
+    <g pointerEvents="none">
+      <rect x={boxX} y={boxY} width={width} height={height} rx={4} fill="#111827" stroke="#374151" strokeWidth={1} />
+      <text x={boxX + 6} y={boxY + 11} fontSize={9} fontWeight="bold" fill="#c3c2b7">{timeLabel}</text>
+      {rows.map((row, i) => (
+        <text key={row.label} x={boxX + 6} y={boxY + 11 + (i + 1) * rowHeight} fontSize={9}>
+          <tspan fill={row.color}>● </tspan>
+          <tspan fill="#c3c2b7">{row.label} </tspan>
+          <tspan fill="#ffffff" fontWeight="bold">{row.value}</tspan>
+        </text>
+      ))}
+    </g>
+  )
+}
+
 interface ChartFrameProps {
   title: string
   subtitle?: string
@@ -73,11 +102,12 @@ interface ChartFrameProps {
   onHover: (i: number | null) => void
   n: number
   xLabels: string[]
+  tooltipRows?: TooltipRow[]
   children: React.ReactNode
   legend?: React.ReactNode
 }
 
-const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, onHover, n, xLabels, children, legend }) => {
+const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, onHover, n, xLabels, tooltipRows, children, legend }) => {
   const handleMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
     const relX = ((e.clientX - rect.left) / rect.width) * CHART_WIDTH
@@ -128,6 +158,9 @@ const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, 
             {xLabels[idx]}
           </text>
         ))}
+        {hoveredIndex !== null && n > 0 && tooltipRows && (
+          <HoverTooltip x={xScale(hoveredIndex, n)} timeLabel={xLabels[hoveredIndex]} rows={tooltipRows} />
+        )}
       </svg>
     </div>
   )
@@ -162,6 +195,15 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
   const last = snapshots[n - 1]
   const hovered = hoveredIndex !== null ? snapshots[hoveredIndex] : last
 
+  const tooltipRows: TooltipRow[] = hoveredIndex !== null && hovered
+    ? [
+        { label: 'Close', value: `$${fmt(hovered.close_price)}`, color: COLOR_CLOSE },
+        { label: 'EMA50', value: `$${fmt(hovered.ema_50)}`, color: COLOR_EMA50 },
+        { label: 'EMA200', value: `$${fmt(hovered.ema_200)}`, color: COLOR_EMA200 },
+        ...(hasVwap ? [{ label: 'VWAP', value: `$${fmt(hovered.vwap)}`, color: COLOR_VWAP }] : [])
+      ]
+    : []
+
   return (
     <ChartFrame
       title={hasVwap ? 'Price vs EMA50 / EMA200 / VWAP' : 'Price vs EMA50 / EMA200'}
@@ -169,6 +211,7 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
       onHover={onHover}
       n={n}
       xLabels={xLabels}
+      tooltipRows={tooltipRows}
       legend={
         <div className="flex items-center" style={{ flexWrap: 'wrap' }}>
           <LegendItem color={COLOR_CLOSE} label="Close" value={`$${fmt(hovered?.close_price)}`} />
@@ -202,6 +245,10 @@ const RSIChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (
   const last = snapshots[n - 1]
   const hovered = hoveredIndex !== null ? snapshots[hoveredIndex] : last
 
+  const tooltipRows: TooltipRow[] = hoveredIndex !== null && hovered
+    ? [{ label: 'RSI', value: fmt(hovered.rsi, 1), color: COLOR_CLOSE }]
+    : []
+
   return (
     <ChartFrame
       title="RSI (14)"
@@ -210,6 +257,7 @@ const RSIChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (
       onHover={onHover}
       n={n}
       xLabels={xLabels}
+      tooltipRows={tooltipRows}
       legend={<span className="text-lg font-bold text-white">{fmt(hovered?.rsi, 1)}</span>}
     >
       <line x1={PAD} x2={CHART_WIDTH - PAD} y1={y(70)} y2={y(70)} stroke={COLOR_GRID} strokeWidth={1} />
@@ -239,6 +287,10 @@ const MACDChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: 
   const hovered = hoveredIndex !== null ? snapshots[hoveredIndex] : last
   const hoveredVal = hovered?.macd_histogram ?? null
 
+  const tooltipRows: TooltipRow[] = hoveredIndex !== null && hovered
+    ? [{ label: 'Histogram', value: fmt(hovered.macd_histogram, 3), color: (hovered.macd_histogram ?? 0) >= 0 ? COLOR_BULLISH : COLOR_BEARISH }]
+    : []
+
   return (
     <ChartFrame
       title="MACD Histogram"
@@ -247,6 +299,7 @@ const MACDChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: 
       onHover={onHover}
       n={n}
       xLabels={xLabels}
+      tooltipRows={tooltipRows}
       legend={
         <div className="flex items-center" style={{ gap: 8 }}>
           <div className="flex items-center" style={{ gap: 4 }}>
