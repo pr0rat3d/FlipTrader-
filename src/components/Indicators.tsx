@@ -108,7 +108,7 @@ interface ChartFrameProps {
 }
 
 const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, onHover, n, xLabels, tooltipRows, children, legend }) => {
-  const handleMove = (e: React.PointerEvent<SVGSVGElement>) => {
+  const handleMove = (e: React.PointerEvent<SVGRectElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
     const relX = ((e.clientX - rect.left) / rect.width) * CHART_WIDTH
     if (n <= 1) { onHover(0); return }
@@ -131,9 +131,16 @@ const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, 
       <svg
         viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT + AXIS_HEIGHT}`}
         style={{ width: '100%', height: 'auto', display: 'block' }}
-        onPointerMove={handleMove}
-        onPointerLeave={() => onHover(null)}
       >
+        {/* SVG only fires pointer events on painted areas by default - most of a line
+            chart's area is empty space between thin strokes, so without this the
+            crosshair/tooltip would only trigger when the cursor lands exactly on a line. */}
+        <rect
+          x={0} y={0} width={CHART_WIDTH} height={CHART_HEIGHT}
+          fill="transparent"
+          onPointerMove={handleMove}
+          onPointerLeave={() => onHover(null)}
+        />
         {children}
         {hoveredIndex !== null && n > 0 && (
           <line
