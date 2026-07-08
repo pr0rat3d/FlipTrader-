@@ -3,10 +3,11 @@ import { Dashboard } from './components/Dashboard'
 import { WatchlistManager } from './components/WatchlistManager'
 import { Settings } from './components/Settings'
 import { AlertHistory } from './components/AlertHistory'
+import { Indicators } from './components/Indicators'
 import { useFirebase } from './hooks/useFirebase'
 import './index.css'
 
-type Page = 'dashboard' | 'watchlist' | 'history' | 'settings'
+type Page = 'dashboard' | 'watchlist' | 'indicators' | 'history' | 'settings'
 
 export const App: React.FC = () => {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
@@ -16,6 +17,7 @@ export const App: React.FC = () => {
     switch (currentPage) {
       case 'dashboard': return <Dashboard />
       case 'watchlist': return <WatchlistManager />
+      case 'indicators': return <Indicators />
       case 'history': return <AlertHistory />
       case 'settings': return <Settings />
       default: return <Dashboard />
@@ -24,12 +26,12 @@ export const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-black text-white">
-      <div className="min-h-[calc(100vh-60px)]">
+      <div className="min-h-[calc(100vh-60px)] pb-20">
         {renderPage()}
       </div>
 
       <nav className="fixed bottom-0 w-full bg-gray-900 border-t border-gray-700 flex justify-around">
-        {(['dashboard', 'watchlist', 'history', 'settings'] as const).map(page => (
+        {(['dashboard', 'watchlist', 'indicators', 'history', 'settings'] as const).map(page => (
           <button
             key={page}
             onClick={() => setCurrentPage(page)}

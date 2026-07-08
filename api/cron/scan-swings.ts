@@ -5,6 +5,7 @@ import { getDailyCloses } from './helpers/twelvedata.js'
 import { sendToTopic } from './helpers/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from './helpers/verifyCronSecret.js'
+import { recordSnapshot } from './helpers/snapshot.js'
 
 // Capped at 8 symbols: Twelve Data's free tier allows 8 API credits/minute,
 // and this loop fires sequentially with no throttling.
@@ -32,6 +33,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const symbol of STOCKS_TO_SCAN) {
       const closes = await getDailyCloses(symbol)
       if (!closes || closes.length < 14) continue
+
+      await recordSnapshot(symbol, 'swing', closes)
 
       const rsiValues = calculateRSI(closes, 14)
       const currentRSI = rsiValues[rsiValues.length - 1]

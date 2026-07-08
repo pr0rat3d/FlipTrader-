@@ -62,6 +62,29 @@ export const getProfitTargets = async () => {
   return data
 }
 
+export const getIndicatorSnapshots = async (symbol: string, limit = 60) => {
+  const { data, error } = await supabase
+    .from('indicator_snapshots')
+    .select('*')
+    .eq('symbol', symbol)
+    .order('timestamp', { ascending: false })
+    .limit(limit)
+
+  if (error) throw error
+  return (data || []).reverse()
+}
+
+export const subscribeToIndicatorSnapshots = (symbol: string, callback: (row: any) => void) => {
+  return supabase
+    .channel(`indicator_snapshots:${symbol}`)
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'indicator_snapshots', filter: `symbol=eq.${symbol}` },
+      callback
+    )
+    .subscribe()
+}
+
 export const saveUserPreferences = async (userId: string, preferences: any) => {
   const { data, error } = await supabase
     .from('user_preferences')

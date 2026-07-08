@@ -6,6 +6,7 @@ import { isMarketOpen } from './helpers/marketHours.js'
 import { sendToTopic } from './helpers/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from './helpers/verifyCronSecret.js'
+import { recordSnapshot } from './helpers/snapshot.js'
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
@@ -26,6 +27,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const symbol of indices) {
       const closes = await getIntradayCloses(symbol)
       if (!closes) continue
+
+      await recordSnapshot(symbol, 'day_trade', closes)
 
       const signal = analyzeCandles(closes)
 

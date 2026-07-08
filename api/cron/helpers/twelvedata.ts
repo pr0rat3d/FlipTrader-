@@ -23,10 +23,11 @@ const fetchCloses = async (symbol: string, interval: string, outputsize: number)
   }
 }
 
-export const getIntradayCloses = (symbol: string, outputsize: number = 50): Promise<number[] | null> => {
+// 300 bars: enough lookback for a meaningful EMA200 (not just its seed window).
+export const getIntradayCloses = (symbol: string, outputsize: number = 300): Promise<number[] | null> => {
   return fetchCloses(symbol, '5min', outputsize)
 }
 
-export const getDailyCloses = (symbol: string, outputsize: number = 30): Promise<number[] | null> => {
+export const getDailyCloses = (symbol: string, outputsize: number = 300): Promise<number[] | null> => {
   return fetchCloses(symbol, '1day', outputsize)
 }

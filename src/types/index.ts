@@ -55,3 +55,18 @@ export interface TechnicalIndicators {
   rsi: number[];
   macd: { line: number[]; signal: number[]; histogram: number[] };
 }
+
+export interface IndicatorSnapshot {
+  id: string;
+  symbol: string;
+  category: 'day_trade' | 'swing';
+  close_price: number;
+  rsi: number | null;
+  macd_line: number | null;
+  macd_signal: number | null;
+  macd_histogram: number | null;
+  ema_50: number | null;
+  ema_200: number | null;
+  timestamp: string;
+  created_at: string;
+}
