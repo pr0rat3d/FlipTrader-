@@ -1,4 +1,4 @@
-import { calculateRSI, calculateMACD, detectRSIDivergence, detectMACDCurl, calculateEMA } from '../../../src/lib/technicalIndicators'
+import { calculateRSI, calculateMACD, detectRSIDivergence, detectMACDCurl, calculateEMA } from '../../../src/lib/technicalIndicators.js'
 
 export interface SignalResult {
   symbol: string

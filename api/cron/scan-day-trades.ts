@@ -1,11 +1,11 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
-import { supabase } from './helpers/supabaseAdmin'
-import { getIntradayCloses } from './helpers/twelvedata'
-import { analyzeCandles } from './helpers/indicators'
-import { isMarketOpen } from './helpers/marketHours'
-import { sendToTopic } from './helpers/firebase-notify'
-import { ALERTS_TOPIC } from '../register-token'
-import { verifyCronSecret } from './helpers/verifyCronSecret'
+import { supabase } from './helpers/supabaseAdmin.js'
+import { getIntradayCloses } from './helpers/twelvedata.js'
+import { analyzeCandles } from './helpers/indicators.js'
+import { isMarketOpen } from './helpers/marketHours.js'
+import { sendToTopic } from './helpers/firebase-notify.js'
+import { ALERTS_TOPIC } from '../register-token.js'
+import { verifyCronSecret } from './helpers/verifyCronSecret.js'
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return

@@ -1,10 +1,10 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
-import { supabase } from './helpers/supabaseAdmin'
-import { calculateRSI } from '../../src/lib/technicalIndicators'
-import { getDailyCloses } from './helpers/twelvedata'
-import { sendToTopic } from './helpers/firebase-notify'
-import { ALERTS_TOPIC } from '../register-token'
-import { verifyCronSecret } from './helpers/verifyCronSecret'
+import { supabase } from './helpers/supabaseAdmin.js'
+import { calculateRSI } from '../../src/lib/technicalIndicators.js'
+import { getDailyCloses } from './helpers/twelvedata.js'
+import { sendToTopic } from './helpers/firebase-notify.js'
+import { ALERTS_TOPIC } from '../register-token.js'
+import { verifyCronSecret } from './helpers/verifyCronSecret.js'
 
 // Capped at 8 symbols: Twelve Data's free tier allows 8 API credits/minute,
 // and this loop fires sequentially with no throttling.
