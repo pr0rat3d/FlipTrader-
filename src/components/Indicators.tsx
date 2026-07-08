@@ -17,6 +17,7 @@ const COLOR_GRID = '#374151'
 
 const CHART_WIDTH = 600
 const CHART_HEIGHT = 140
+const AXIS_HEIGHT = 18
 const PAD = 10
 
 const xScale = (i: number, n: number) => (n <= 1 ? CHART_WIDTH / 2 : (i / (n - 1)) * (CHART_WIDTH - PAD * 2) + PAD)
@@ -26,7 +27,32 @@ const buildYScale = (values: number[]) => {
   const min = finite.length ? Math.min(...finite) : 0
   const max = finite.length ? Math.max(...finite) : 1
   const span = max - min || 1
-  return (v: number) => CHART_HEIGHT - PAD - ((v - min) / span) * (CHART_HEIGHT - PAD * 2)
+  const scale = (v: number) => CHART_HEIGHT - PAD - ((v - min) / span) * (CHART_HEIGHT - PAD * 2)
+  return Object.assign(scale, { min, max })
+}
+
+// Picks ~count evenly spaced indices (always including first and last) for x-axis ticks
+const pickTickIndices = (n: number, count: number): number[] => {
+  if (n <= 0) return []
+  if (n <= count) return Array.from({ length: n }, (_, i) => i)
+  const step = (n - 1) / (count - 1)
+  return Array.from({ length: count }, (_, i) => Math.round(i * step))
+}
+
+// Intraday (day-trade, 5min bars) shows time-of-day; swing (daily bars, can span
+// many days) shows the date instead - same axis, different granularity by data shape.
+const buildXLabels = (snapshots: IndicatorSnapshot[]): string[] => {
+  if (snapshots.length === 0) return []
+  const first = new Date(snapshots[0].timestamp)
+  const last = new Date(snapshots[snapshots.length - 1].timestamp)
+  const sameDay = first.toDateString() === last.toDateString()
+
+  return snapshots.map(s => {
+    const d = new Date(s.timestamp)
+    return sameDay
+      ? d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+      : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  })
 }
 
 const linePath = (points: Array<{ x: number; y: number } | null>): string => {
@@ -46,11 +72,12 @@ interface ChartFrameProps {
   hoveredIndex: number | null
   onHover: (i: number | null) => void
   n: number
+  xLabels: string[]
   children: React.ReactNode
   legend?: React.ReactNode
 }
 
-const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, onHover, n, children, legend }) => {
+const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, onHover, n, xLabels, children, legend }) => {
   const handleMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
     const relX = ((e.clientX - rect.left) / rect.width) * CHART_WIDTH
@@ -59,6 +86,8 @@ const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, 
     const idx = Math.round((relX - PAD) / step)
     onHover(Math.min(n - 1, Math.max(0, idx)))
   }
+
+  const tickIndices = pickTickIndices(n, 4)
 
   return (
     <div className="p-3 bg-gray-800 rounded mb-3">
@@ -70,7 +99,7 @@ const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, 
         {legend}
       </div>
       <svg
-        viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+        viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT + AXIS_HEIGHT}`}
         style={{ width: '100%', height: 'auto', display: 'block' }}
         onPointerMove={handleMove}
         onPointerLeave={() => onHover(null)}
@@ -86,6 +115,19 @@ const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hoveredIndex, 
             strokeWidth={1}
           />
         )}
+        <line x1={PAD} x2={CHART_WIDTH - PAD} y1={CHART_HEIGHT} y2={CHART_HEIGHT} stroke={COLOR_GRID} strokeWidth={1} />
+        {tickIndices.map((idx, k) => (
+          <text
+            key={idx}
+            x={xScale(idx, n)}
+            y={CHART_HEIGHT + 13}
+            textAnchor={k === 0 ? 'start' : k === tickIndices.length - 1 ? 'end' : 'middle'}
+            fontSize={9}
+            fill={COLOR_MUTED}
+          >
+            {xLabels[idx]}
+          </text>
+        ))}
       </svg>
     </div>
   )
@@ -103,9 +145,10 @@ const fmt = (v: number | null | undefined, digits = 2) => (v === null || v === u
 
 interface ChartsProps {
   snapshots: IndicatorSnapshot[]
+  xLabels: string[]
 }
 
-const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, hoveredIndex, onHover }) => {
+const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, xLabels, hoveredIndex, onHover }) => {
   const n = snapshots.length
   const closes = snapshots.map(s => s.close_price)
   const ema50s = snapshots.map(s => s.ema_50 ?? NaN)
@@ -125,6 +168,7 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
       hoveredIndex={hoveredIndex}
       onHover={onHover}
       n={n}
+      xLabels={xLabels}
       legend={
         <div className="flex items-center" style={{ flexWrap: 'wrap' }}>
           <LegendItem color={COLOR_CLOSE} label="Close" value={`$${fmt(hovered?.close_price)}`} />
@@ -134,6 +178,8 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
         </div>
       }
     >
+      <text x={CHART_WIDTH - PAD} y={PAD + 8} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>${fmt(y.max)}</text>
+      <text x={CHART_WIDTH - PAD} y={CHART_HEIGHT - PAD - 2} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>${fmt(y.min)}</text>
       <path d={linePath(toPoints(ema200s))} fill="none" stroke={COLOR_EMA200} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       <path d={linePath(toPoints(ema50s))} fill="none" stroke={COLOR_EMA50} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       {hasVwap && (
@@ -147,7 +193,7 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
   )
 }
 
-const RSIChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, hoveredIndex, onHover }) => {
+const RSIChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, xLabels, hoveredIndex, onHover }) => {
   const n = snapshots.length
   const rsis = snapshots.map(s => s.rsi ?? NaN)
   const y = (v: number) => CHART_HEIGHT - PAD - (v / 100) * (CHART_HEIGHT - PAD * 2)
@@ -163,6 +209,7 @@ const RSIChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (
       hoveredIndex={hoveredIndex}
       onHover={onHover}
       n={n}
+      xLabels={xLabels}
       legend={<span className="text-lg font-bold text-white">{fmt(hovered?.rsi, 1)}</span>}
     >
       <line x1={PAD} x2={CHART_WIDTH - PAD} y1={y(70)} y2={y(70)} stroke={COLOR_GRID} strokeWidth={1} />
@@ -177,7 +224,7 @@ const RSIChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (
   )
 }
 
-const MACDChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, hoveredIndex, onHover }) => {
+const MACDChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, xLabels, hoveredIndex, onHover }) => {
   const n = snapshots.length
   const hist = snapshots.map(s => s.macd_histogram ?? NaN)
   const finite = hist.filter(Number.isFinite)
@@ -199,6 +246,7 @@ const MACDChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: 
       hoveredIndex={hoveredIndex}
       onHover={onHover}
       n={n}
+      xLabels={xLabels}
       legend={
         <div className="flex items-center" style={{ gap: 8 }}>
           <div className="flex items-center" style={{ gap: 4 }}>
@@ -214,6 +262,9 @@ const MACDChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: 
       }
     >
       <line x1={PAD} x2={CHART_WIDTH - PAD} y1={zeroY} y2={zeroY} stroke={COLOR_GRID} strokeWidth={1} />
+      <text x={CHART_WIDTH - PAD} y={PAD + 8} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>{fmt(maxAbs, 3)}</text>
+      <text x={CHART_WIDTH - PAD} y={zeroY - 3} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>0</text>
+      <text x={CHART_WIDTH - PAD} y={CHART_HEIGHT - PAD - 2} textAnchor="end" fontSize={9} fill={COLOR_MUTED}>-{fmt(maxAbs, 3)}</text>
       {hist.map((v, i) => {
         if (!Number.isFinite(v)) return null
         const x = xScale(i, n) - barWidth / 2
@@ -281,6 +332,7 @@ export const Indicators: React.FC = () => {
   }, [symbols.join(',')])
 
   const { snapshots, loading } = useIndicatorSnapshots(selectedSymbol)
+  const xLabels = useMemo(() => buildXLabels(snapshots), [snapshots])
 
   const selectCategory = (next: 'day_trade' | 'swing') => {
     setCategory(next)
@@ -352,9 +404,9 @@ export const Indicators: React.FC = () => {
 
       {!loading && snapshots.length > 0 && (
         <>
-          <PriceChart snapshots={snapshots} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
-          <RSIChart snapshots={snapshots} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
-          <MACDChart snapshots={snapshots} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
+          <PriceChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
+          <RSIChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
+          <MACDChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
 
           {hoveredIndex !== null && snapshots[hoveredIndex] && (
             <p className="text-xs text-gray-400 mb-3">{timeLabel(snapshots[hoveredIndex].timestamp)}</p>

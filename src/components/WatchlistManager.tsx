@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
 import { getWatchlist, addWatchlistSymbol, removeWatchlistSymbol } from '../lib/supabase'
 import { Watchlist } from '../types'
@@ -6,9 +6,20 @@ import { Auth } from './Auth'
 
 const MAX_WATCHLIST_SIZE = 20
 
+interface SymbolMatch {
+  symbol: string
+  description: string
+}
+
 export const WatchlistManager: React.FC = () => {
   const { user, loading: authLoading } = useAuth()
-  const [symbol, setSymbol] = useState('')
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState<SymbolMatch | null>(null)
+  const [results, setResults] = useState<SymbolMatch[]>([])
+  const [showDropdown, setShowDropdown] = useState(false)
+  const [searching, setSearching] = useState(false)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const [type, setType] = useState<'day_trade' | 'swing'>('swing')
   const [watchlist, setWatchlist] = useState<Watchlist[]>([])
   const [loading, setLoading] = useState(true)
@@ -35,13 +46,47 @@ export const WatchlistManager: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  const addSymbol = async () => {
-    if (!user || !symbol) return
+  const handleQueryChange = (value: string) => {
+    setQuery(value)
+    setSelected(null)
     setError(null)
 
-    const upper = symbol.toUpperCase()
-    if (watchlist.some(w => w.symbol === upper && w.type === type)) {
-      setError(`${upper} is already on your ${type.replace('_', ' ')} watchlist`)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+
+    const trimmed = value.trim()
+    if (trimmed.length < 1) {
+      setResults([])
+      setShowDropdown(false)
+      return
+    }
+
+    debounceRef.current = setTimeout(async () => {
+      setSearching(true)
+      try {
+        const response = await fetch(`/api/symbol-search?q=${encodeURIComponent(trimmed)}`)
+        const data = await response.json()
+        setResults(data.results || [])
+        setShowDropdown(true)
+      } catch (err) {
+        console.error('Error searching symbols:', err)
+      } finally {
+        setSearching(false)
+      }
+    }, 300)
+  }
+
+  const pickResult = (match: SymbolMatch) => {
+    setSelected(match)
+    setQuery(`${match.symbol} - ${match.description}`)
+    setShowDropdown(false)
+  }
+
+  const addSymbol = async () => {
+    if (!user || !selected) return
+    setError(null)
+
+    if (watchlist.some(w => w.symbol === selected.symbol && w.type === type)) {
+      setError(`${selected.symbol} is already on your ${type.replace('_', ' ')} watchlist`)
       return
     }
     if (watchlist.length >= MAX_WATCHLIST_SIZE) {
@@ -50,8 +95,9 @@ export const WatchlistManager: React.FC = () => {
     }
 
     try {
-      await addWatchlistSymbol(user.id, upper, type)
-      setSymbol('')
+      await addWatchlistSymbol(user.id, selected.symbol, type)
+      setQuery('')
+      setSelected(null)
       await loadWatchlist()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -86,13 +132,47 @@ export const WatchlistManager: React.FC = () => {
       <h2 className="text-2xl font-bold text-white mb-4">Watchlist</h2>
 
       <div className="flex gap-2 mb-2">
-        <input
-          type="text"
-          value={symbol}
-          onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-          placeholder="Enter symbol (e.g., AAPL)"
-          className="flex-1 px-3 py-2 bg-gray-700 text-white rounded border border-gray-600"
-        />
+        <div style={{ position: 'relative', flex: 1 }}>
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => handleQueryChange(e.target.value)}
+            onFocus={() => { if (results.length > 0) setShowDropdown(true) }}
+            onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
+            placeholder="Search company or ticker (e.g., Apple or AAPL)"
+            className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600"
+          />
+          {showDropdown && (results.length > 0 || searching) && (
+            <div
+              style={{
+                position: 'absolute',
+                top: '100%',
+                left: 0,
+                right: 0,
+                zIndex: 10,
+                background: '#1f2937',
+                border: '1px solid #4b5563',
+                borderRadius: 6,
+                marginTop: 2,
+                maxHeight: 240,
+                overflowY: 'auto'
+              }}
+            >
+              {searching && <div className="text-xs text-gray-400" style={{ padding: '8px 12px' }}>Searching...</div>}
+              {!searching && results.map(match => (
+                <div
+                  key={match.symbol}
+                  onMouseDown={() => pickResult(match)}
+                  className="cursor-pointer"
+                  style={{ padding: '8px 12px', borderBottom: '1px solid #374151' }}
+                >
+                  <span className="text-white font-bold">{match.symbol}</span>
+                  <span className="text-xs text-gray-400 ml-2">{match.description}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         <select
           value={type}
           onChange={(e) => setType(e.target.value as 'day_trade' | 'swing')}
@@ -103,11 +183,15 @@ export const WatchlistManager: React.FC = () => {
         </select>
         <button
           onClick={addSymbol}
+          disabled={!selected}
           className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700"
+          style={{ opacity: selected ? 1 : 0.5 }}
         >
           Add
         </button>
       </div>
+
+      <p className="text-xs text-gray-400 mb-2">Pick a match from the dropdown to add it - prevents typos from following the wrong ticker.</p>
 
       {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
 
