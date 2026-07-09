@@ -45,7 +45,7 @@ export const getSwingAlerts = async () => {
   const { data, error } = await supabase
     .from('swing_trade_alerts')
     .select('*')
-    .order('created_at', { ascending: false })
+    .order('oversold_date', { ascending: false })
     .limit(20)
 
   if (error) throw error

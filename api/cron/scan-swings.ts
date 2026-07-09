@@ -58,22 +58,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (currentRSI < 30) {
         const sector = sectorBySymbol[symbol] || 'other'
 
+        // One row per symbol, kept up to date in place - a symbol that stays
+        // oversold across many consecutive runs should update its existing card's
+        // timestamp/RSI, not stack up a new duplicate card every run.
+        const { data: existing } = await supabase
+          .from('swing_trade_alerts')
+          .select('id')
+          .eq('symbol', symbol)
+          .maybeSingle()
+
         const { error } = await supabase
           .from('swing_trade_alerts')
-          .insert({
-            symbol,
-            rsi_value: currentRSI,
-            sector,
-            oversold_date: new Date()
-          })
+          .upsert(
+            { symbol, rsi_value: currentRSI, sector, oversold_date: new Date() },
+            { onConflict: 'symbol' }
+          )
 
         if (!error) {
           oversoldAlerts.push({ symbol, rsi: currentRSI, sector })
-          await sendToTopic(
-            ALERTS_TOPIC,
-            `Swing Alert: ${symbol}`,
-            `Oversold at RSI ${currentRSI.toFixed(1)} (${sector})`
-          )
+          // Only notify on a genuinely new oversold occurrence, not every re-fire
+          // while the symbol remains oversold across subsequent runs.
+          if (!existing) {
+            await sendToTopic(
+              ALERTS_TOPIC,
+              `Swing Alert: ${symbol}`,
+              `Oversold at RSI ${currentRSI.toFixed(1)} (${sector})`
+            )
+          }
         }
       }
     }
