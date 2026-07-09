@@ -30,6 +30,16 @@ export interface ProfitTarget {
   entry_time: string;
   target_50ema_price: number;
   target_hit_at?: string;
+  milestone_10_price: number | null;
+  milestone_10_hit_at: string | null;
+  milestone_20_price: number | null;
+  milestone_20_hit_at: string | null;
+  milestone_30_price: number | null;
+  milestone_30_hit_at: string | null;
+  max_favorable_price: number | null;
+  max_favorable_pct: number | null;
+  max_favorable_at: string | null;
+  status: 'open' | 'target_hit' | 'expired';
   created_at: string;
 }
 

@@ -1,18 +1,5 @@
 import { Candle } from './twelvedata.js'
-
-const nyDateKey = (isoOrDatetime: string | Date): string => {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).formatToParts(new Date(isoOrDatetime))
-
-  const year = parts.find(p => p.type === 'year')?.value
-  const month = parts.find(p => p.type === 'month')?.value
-  const day = parts.find(p => p.type === 'day')?.value
-  return `${year}-${month}-${day}`
-}
+import { nyDateKey } from './marketHours.js'
 
 // Session VWAP: cumulative typical-price-weighted average, reset each trading day.
 // Recomputed from scratch every run (same style as RSI/MACD/EMA) - no incremental state.

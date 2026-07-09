@@ -62,6 +62,16 @@ export const getProfitTargets = async () => {
   return data
 }
 
+export const getProfitTargetsForAlert = async (alertId: string) => {
+  const { data, error } = await supabase
+    .from('profit_targets')
+    .select('*')
+    .eq('day_trade_alert_id', alertId)
+
+  if (error) throw error
+  return data
+}
+
 export const getIndicatorSnapshots = async (symbol: string, limit = 60) => {
   const { data, error } = await supabase
     .from('indicator_snapshots')

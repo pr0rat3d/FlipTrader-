@@ -7,7 +7,9 @@ export const recordSnapshot = async (
   symbol: string,
   category: SnapshotCategory,
   closes: number[],
-  vwap: number | null = null
+  vwap: number | null = null,
+  high: number | null = null,
+  low: number | null = null
 ) => {
   if (closes.length < 26) return
 
@@ -21,6 +23,8 @@ export const recordSnapshot = async (
     symbol,
     category,
     close_price: closes[closes.length - 1],
+    high_price: high,
+    low_price: low,
     rsi: rsiValues[rsiValues.length - 1] ?? null,
     macd_line: latestMacd?.MACD ?? null,
     macd_signal: latestMacd?.signal ?? null,

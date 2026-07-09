@@ -1,0 +1,211 @@
+import React, { useEffect, useMemo, useState } from 'react'
+import { getAlerts, getProfitTargets } from '../lib/supabase'
+import { getTierColor, getTierLabel } from '../lib/alerts'
+import { Alert, ProfitTarget } from '../types'
+import { fmt, timeLabel } from './charts/ChartPrimitives'
+
+const TIERS: Array<'TTF' | 'DTF' | 'STF'> = ['TTF', 'DTF', 'STF']
+
+interface TierStats {
+  tier: 'TTF' | 'DTF' | 'STF'
+  totalLegs: number
+  resolvedLegs: number
+  targetHit: number
+  expired: number
+  open: number
+  milestone10Pct: number
+  milestone20Pct: number
+  milestone30Pct: number
+  targetHitPct: number
+  avgMaxFavorablePct: number | null
+}
+
+const computeTierStats = (tier: 'TTF' | 'DTF' | 'STF', legs: ProfitTarget[]): TierStats => {
+  const totalLegs = legs.length
+  const targetHit = legs.filter(l => l.status === 'target_hit').length
+  const expired = legs.filter(l => l.status === 'expired').length
+  const open = legs.filter(l => l.status === 'open').length
+  const resolvedLegs = targetHit + expired
+
+  const pct = (count: number) => (totalLegs > 0 ? (count / totalLegs) * 100 : 0)
+
+  const favorableValues = legs.map(l => l.max_favorable_pct).filter((v): v is number => v !== null)
+  const avgMaxFavorablePct = favorableValues.length > 0
+    ? favorableValues.reduce((a, b) => a + b, 0) / favorableValues.length
+    : null
+
+  return {
+    tier,
+    totalLegs,
+    resolvedLegs,
+    targetHit,
+    expired,
+    open,
+    milestone10Pct: pct(legs.filter(l => l.milestone_10_hit_at !== null).length),
+    milestone20Pct: pct(legs.filter(l => l.milestone_20_hit_at !== null).length),
+    milestone30Pct: pct(legs.filter(l => l.milestone_30_hit_at !== null).length),
+    targetHitPct: resolvedLegs > 0 ? (targetHit / resolvedLegs) * 100 : 0,
+    avgMaxFavorablePct
+  }
+}
+
+const COLOR_MILESTONE = '#3987e5'
+
+const MilestoneBar: React.FC<{ label: string; pct: number; color: string }> = ({ label, pct, color }) => (
+  <div className="flex items-center mb-1" style={{ gap: 8 }}>
+    <span className="text-xs text-gray-400" style={{ width: 90, flexShrink: 0 }}>{label}</span>
+    <div style={{ flex: 1, background: '#374151', borderRadius: 3, height: 10, overflow: 'hidden' }}>
+      <div style={{ width: `${Math.min(100, Math.max(0, pct))}%`, background: color, height: '100%' }} />
+    </div>
+    <span className="text-xs text-white font-bold" style={{ width: 40, textAlign: 'right', flexShrink: 0 }}>{pct.toFixed(0)}%</span>
+  </div>
+)
+
+const TierCard: React.FC<{ stats: TierStats }> = ({ stats }) => {
+  const color = getTierColor(stats.tier)
+  const label = getTierLabel(stats.tier)
+
+  return (
+    <div className="p-3 bg-gray-800 rounded mb-3" style={{ borderLeft: `4px solid ${color}` }}>
+      <div className="flex justify-between items-center mb-2">
+        <h3 className="text-sm font-bold text-white">{stats.tier} <span className="text-xs text-gray-400">{label}</span></h3>
+        <span className="text-xs text-gray-400">{stats.totalLegs} signal{stats.totalLegs !== 1 ? 's' : ''}</span>
+      </div>
+
+      {stats.totalLegs === 0 ? (
+        <p className="text-xs text-gray-400">No signals recorded yet for this tier.</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <div>
+              <p className="text-xs text-gray-400">Target-hit rate (resolved only)</p>
+              <p className="text-sm font-bold text-white">
+                {stats.resolvedLegs > 0 ? `${stats.targetHitPct.toFixed(0)}%` : '—'}
+                <span className="text-xs text-gray-400"> ({stats.targetHit}/{stats.resolvedLegs})</span>
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-400">Avg max favorable move</p>
+              <p className="text-sm font-bold text-white">
+                {stats.avgMaxFavorablePct !== null ? `${stats.avgMaxFavorablePct.toFixed(1)}%` : '—'}
+              </p>
+            </div>
+          </div>
+
+          <MilestoneBar label="Milestone 10%" pct={stats.milestone10Pct} color={COLOR_MILESTONE} />
+          <MilestoneBar label="Milestone 20%" pct={stats.milestone20Pct} color={COLOR_MILESTONE} />
+          <MilestoneBar label="Milestone 30%" pct={stats.milestone30Pct} color={COLOR_MILESTONE} />
+          <MilestoneBar label="Full target" pct={stats.totalLegs > 0 ? (stats.targetHit / stats.totalLegs) * 100 : 0} color={color} />
+
+          {stats.open > 0 && (
+            <p className="text-xs text-gray-400 mt-2">{stats.open} still open (pending)</p>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+const statusLabel = (status: ProfitTarget['status']) => {
+  if (status === 'target_hit') return { text: 'Target hit', color: '#4ade80' }
+  if (status === 'expired') return { text: 'Expired', color: '#f87171' }
+  return { text: 'Open', color: '#898781' }
+}
+
+export const Performance: React.FC = () => {
+  const [alerts, setAlerts] = useState<Alert[]>([])
+  const [profitTargets, setProfitTargets] = useState<ProfitTarget[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [alertData, targetData] = await Promise.all([getAlerts(), getProfitTargets()])
+        setAlerts(alertData || [])
+        setProfitTargets(targetData || [])
+      } catch (error) {
+        console.error('Error loading performance data:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+    load()
+  }, [])
+
+  const alertTierById = useMemo(() => {
+    const map = new Map<string, 'TTF' | 'DTF' | 'STF'>()
+    for (const alert of alerts) map.set(alert.id, alert.ttf_status)
+    return map
+  }, [alerts])
+
+  const tierStats = useMemo(() => {
+    return TIERS.map(tier => {
+      const legs = profitTargets.filter(pt => alertTierById.get(pt.day_trade_alert_id) === tier)
+      return computeTierStats(tier, legs)
+    })
+  }, [profitTargets, alertTierById])
+
+  const recentLegs = useMemo(
+    () => [...profitTargets].sort((a, b) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime()).slice(0, 30),
+    [profitTargets]
+  )
+
+  return (
+    <div className="p-4">
+      <h2 className="text-2xl font-bold text-white mb-2">Performance</h2>
+      <p className="text-xs text-gray-400 mb-4">
+        Did the TTF/DTF/STF reversal signals actually pay off? Milestones are % of the
+        price distance from entry to the 50 EMA target (10/20/30%), with the full target
+        as the "50 tap." Live tracking uses real-time quotes; historical replay uses
+        5-minute close-only snapshots, so it may understate the true peak favorable move.
+      </p>
+
+      {loading && <p className="text-gray-400">Loading performance data...</p>}
+
+      {!loading && profitTargets.length === 0 && (
+        <p className="text-gray-400">
+          No signals have fired yet, so there's nothing to analyze. This fills in
+          automatically as real TTF/DTF/STF alerts occur.
+        </p>
+      )}
+
+      {!loading && profitTargets.length > 0 && (
+        <>
+          {tierStats.map(stats => <TierCard key={stats.tier} stats={stats} />)}
+
+          <h3 className="text-lg font-bold text-white mb-2 mt-4">Recent Signals</h3>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  {['Time', 'Symbol', 'Entry', 'Target', 'Max Favorable', 'Status'].map(h => (
+                    <th key={h} className="text-xs text-gray-400" style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #374151' }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {recentLegs.map(leg => {
+                  const status = statusLabel(leg.status)
+                  return (
+                    <tr key={leg.id}>
+                      <td className="text-xs text-white" style={{ padding: '4px 8px' }}>{timeLabel(leg.entry_time)}</td>
+                      <td className="text-xs text-white font-bold" style={{ padding: '4px 8px' }}>{leg.symbol}</td>
+                      <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(leg.entry_price)}</td>
+                      <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(leg.target_50ema_price)}</td>
+                      <td className="text-xs text-white" style={{ padding: '4px 8px' }}>
+                        {leg.max_favorable_pct !== null ? `${leg.max_favorable_pct.toFixed(1)}%` : '—'}
+                      </td>
+                      <td className="text-xs font-bold" style={{ padding: '4px 8px', color: status.color }}>{status.text}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
