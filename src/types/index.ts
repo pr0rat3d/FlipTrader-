@@ -71,6 +71,9 @@ export interface IndicatorSnapshot {
   symbol: string;
   category: 'day_trade' | 'swing';
   close_price: number;
+  open_price: number | null;
+  high_price: number | null;
+  low_price: number | null;
   rsi: number | null;
   macd_line: number | null;
   macd_signal: number | null;

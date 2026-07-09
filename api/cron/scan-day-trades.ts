@@ -60,7 +60,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const closes = candles.map(c => c.close)
       const latest = candles[candles.length - 1]
       const vwap = calculateSessionVWAP(candles)
-      await recordSnapshot(symbol, 'day_trade', closes, vwap, latest.high, latest.low)
+      await recordSnapshot(symbol, 'day_trade', closes, { vwap, open: latest.open, high: latest.high, low: latest.low })
 
       const signal = analyzeCandles(closes)
 
@@ -82,7 +82,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const closes = candles.map(c => c.close)
       const latest = candles[candles.length - 1]
       const vwap = calculateSessionVWAP(candles)
-      await recordSnapshot(symbol, 'day_trade', closes, vwap, latest.high, latest.low)
+      await recordSnapshot(symbol, 'day_trade', closes, { vwap, open: latest.open, high: latest.high, low: latest.low })
     }
 
     const triggeredIndices = signalResults.map(r => r.symbol)

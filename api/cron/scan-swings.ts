@@ -1,7 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { calculateRSI } from '../../src/lib/technicalIndicators.js'
-import { getDailyCloses } from '../../server/twelvedata.js'
+import { getDailyCandles } from '../../server/twelvedata.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
@@ -47,10 +47,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const oversoldAlerts = []
 
     for (const symbol of batch) {
-      const closes = await getDailyCloses(symbol)
-      if (!closes || closes.length < 14) continue
+      const candles = await getDailyCandles(symbol)
+      if (!candles || candles.length < 14) continue
 
-      await recordSnapshot(symbol, 'swing', closes)
+      const closes = candles.map(c => c.close)
+      const latest = candles[candles.length - 1]
+      await recordSnapshot(symbol, 'swing', closes, { open: latest.open, high: latest.high, low: latest.low })
 
       const rsiValues = calculateRSI(closes, 14)
       const currentRSI = rsiValues[rsiValues.length - 1]

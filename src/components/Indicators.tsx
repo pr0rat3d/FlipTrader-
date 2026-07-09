@@ -5,12 +5,12 @@ import { getActiveUniverse, getWatchlist } from '../lib/supabase'
 import { IndicatorSnapshot } from '../types'
 import {
   CHART_WIDTH, CHART_HEIGHT, PAD, COLOR_BULLISH, COLOR_BEARISH, COLOR_MUTED, COLOR_GRID,
-  xScale, buildYScale, buildXLabels, timeLabel, fmt, linePath,
-  TooltipRow, ChartFrame, LegendItem
+  xScale, buildYScale, buildXLabels, timeLabel, fmt, linePath, toHeikinAshi,
+  TooltipRow, ChartFrame, LegendItem, CandlestickSeries, OHLCBar
 } from './charts/ChartPrimitives'
 
-// Close is the app's existing bullish green (matches AlertCard.tsx's convention) so
-// the actual price reads as the primary "trend" line; EMAs/VWAP are secondary context.
+// Still used for the RSI line and the current-price badge, both independent of the
+// candlestick colors above.
 const COLOR_CLOSE = '#4ade80'
 const COLOR_EMA50 = '#3987e5'
 const COLOR_EMA200 = '#c98500'
@@ -23,21 +23,41 @@ interface ChartsProps {
 
 const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, xLabels, hoveredIndex, onHover }) => {
   const n = snapshots.length
-  const closes = snapshots.map(s => s.close_price)
   const ema50s = snapshots.map(s => s.ema_50 ?? NaN)
   const ema200s = snapshots.map(s => s.ema_200 ?? NaN)
   const vwaps = snapshots.map(s => s.vwap ?? NaN)
   const hasVwap = vwaps.some(Number.isFinite)
-  const y = buildYScale([...closes, ...ema50s, ...ema200s, ...(hasVwap ? vwaps : [])].filter(Number.isFinite))
+
+  // A snapshot recorded before OHLC capture existed (open_price/high_price/low_price
+  // were added later) has no candle - null keeps it index-aligned with everything
+  // else rather than shifting later bars out of place.
+  const rawBars: Array<OHLCBar | null> = snapshots.map(s =>
+    s.open_price !== null && s.high_price !== null && s.low_price !== null
+      ? { open: s.open_price, high: s.high_price, low: s.low_price, close: s.close_price }
+      : null
+  )
+  const haBars = useMemo(() => toHeikinAshi(rawBars), [snapshots])
+  const haHighLows = haBars.flatMap(b => (b ? [b.high, b.low] : []))
+
+  const y = buildYScale([...haHighLows, ...ema50s, ...ema200s, ...(hasVwap ? vwaps : [])].filter(Number.isFinite))
 
   const toPoints = (vals: number[]) => vals.map((v, i) => (Number.isFinite(v) ? { x: xScale(i, n), y: y(v) } : null))
 
   const last = snapshots[n - 1]
   const hovered = hoveredIndex !== null ? snapshots[hoveredIndex] : last
+  const hoveredHA = hoveredIndex !== null ? haBars[hoveredIndex] : haBars[n - 1]
+  const haColor = hoveredHA && hoveredHA.close >= hoveredHA.open ? COLOR_BULLISH : COLOR_BEARISH
 
   const tooltipRows: TooltipRow[] = hoveredIndex !== null && hovered
     ? [
-        { label: 'Close', value: `$${fmt(hovered.close_price)}`, color: COLOR_CLOSE },
+        ...(hoveredHA
+          ? [
+              { label: 'O', value: `$${fmt(hoveredHA.open)}`, color: haColor },
+              { label: 'H', value: `$${fmt(hoveredHA.high)}`, color: haColor },
+              { label: 'L', value: `$${fmt(hoveredHA.low)}`, color: haColor },
+              { label: 'C', value: `$${fmt(hoveredHA.close)}`, color: haColor }
+            ]
+          : [{ label: 'Close', value: `$${fmt(hovered.close_price)}`, color: COLOR_MUTED }]),
         { label: 'EMA50', value: `$${fmt(hovered.ema_50)}`, color: COLOR_EMA50 },
         { label: 'EMA200', value: `$${fmt(hovered.ema_200)}`, color: COLOR_EMA200 },
         ...(hasVwap ? [{ label: 'VWAP', value: `$${fmt(hovered.vwap)}`, color: COLOR_VWAP }] : [])
@@ -46,7 +66,7 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
 
   return (
     <ChartFrame
-      title={hasVwap ? 'Price vs EMA50 / EMA200 / VWAP' : 'Price vs EMA50 / EMA200'}
+      title={hasVwap ? 'Heikin-Ashi vs EMA50 / EMA200 / VWAP' : 'Heikin-Ashi vs EMA50 / EMA200'}
       hoveredIndex={hoveredIndex}
       onHover={onHover}
       n={n}
@@ -54,7 +74,7 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
       tooltipRows={tooltipRows}
       legend={
         <div className="flex items-center" style={{ flexWrap: 'wrap' }}>
-          <LegendItem color={COLOR_CLOSE} label="Close" value={`$${fmt(hovered?.close_price)}`} />
+          <LegendItem color={haColor} label="HA Close" value={`$${fmt(hoveredHA?.close)}`} />
           <LegendItem color={COLOR_EMA50} label="EMA50" value={`$${fmt(hovered?.ema_50)}`} />
           <LegendItem color={COLOR_EMA200} label="EMA200" value={`$${fmt(hovered?.ema_200)}`} />
           {hasVwap && <LegendItem color={COLOR_VWAP} label="VWAP" value={`$${fmt(hovered?.vwap)}`} />}
@@ -68,10 +88,7 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
       {hasVwap && (
         <path d={linePath(toPoints(vwaps))} fill="none" stroke={COLOR_VWAP} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       )}
-      <path d={linePath(toPoints(closes))} fill="none" stroke={COLOR_CLOSE} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
-      {n > 0 && Number.isFinite(closes[n - 1]) && (
-        <circle cx={xScale(n - 1, n)} cy={y(closes[n - 1])} r={4} fill={COLOR_CLOSE} stroke="#1f2937" strokeWidth={2} />
-      )}
+      <CandlestickSeries bars={haBars} y={y} />
     </ChartFrame>
   )
 }

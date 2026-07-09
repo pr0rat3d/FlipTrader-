@@ -69,6 +69,34 @@ export const linePath = (points: Array<{ x: number; y: number } | null>): string
   return d
 }
 
+export interface OHLCBar {
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+// Heikin-Ashi smoothing: each bar folds in the previous HA bar's open/close, so the
+// chain must be walked in chronological order from the first bar in view - it can't
+// be computed per-bar independently like a regular candle. A null entry (a snapshot
+// recorded before OHLC capture existed, or a genuine data gap) breaks the chain -
+// the next real bar restarts it rather than chaining across the gap.
+export const toHeikinAshi = (bars: Array<OHLCBar | null>): Array<OHLCBar | null> => {
+  const result: Array<OHLCBar | null> = []
+  let prevHA: OHLCBar | null = null
+  for (const bar of bars) {
+    if (!bar) { result.push(null); prevHA = null; continue }
+    const haClose: number = (bar.open + bar.high + bar.low + bar.close) / 4
+    const haOpen: number = prevHA ? (prevHA.open + prevHA.close) / 2 : (bar.open + bar.close) / 2
+    const haHigh: number = Math.max(bar.high, haOpen, haClose)
+    const haLow: number = Math.min(bar.low, haOpen, haClose)
+    const haBar: OHLCBar = { open: haOpen, high: haHigh, low: haLow, close: haClose }
+    result.push(haBar)
+    prevHA = haBar
+  }
+  return result
+}
+
 export interface TooltipRow {
   label: string
   value: string
@@ -173,6 +201,38 @@ export const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hovered
         )}
       </svg>
     </div>
+  )
+}
+
+// One wick + body per bar. `bars` is index-aligned with the chart's full n (a null
+// entry - e.g. a snapshot recorded before OHLC capture existed - simply renders no
+// candle at that x position, same convention as linePath's gap handling).
+export const CandlestickSeries: React.FC<{ bars: Array<OHLCBar | null>; y: (v: number) => number }> = ({ bars, y }) => {
+  const n = bars.length
+  const barWidth = n > 1 ? Math.min(14, ((CHART_WIDTH - PAD * 2) / n) * 0.6) : 10
+
+  return (
+    <>
+      {bars.map((bar, i) => {
+        if (!bar) return null
+        const x = xScale(i, n)
+        const color = bar.close >= bar.open ? COLOR_BULLISH : COLOR_BEARISH
+        const bodyTop = y(Math.max(bar.open, bar.close))
+        const bodyBottom = y(Math.min(bar.open, bar.close))
+        return (
+          <g key={i}>
+            <line x1={x} x2={x} y1={y(bar.high)} y2={y(bar.low)} stroke={color} strokeWidth={1} />
+            <rect
+              x={x - barWidth / 2}
+              y={bodyTop}
+              width={barWidth}
+              height={Math.max(bodyBottom - bodyTop, 1)}
+              fill={color}
+            />
+          </g>
+        )
+      })}
+    </>
   )
 }
 

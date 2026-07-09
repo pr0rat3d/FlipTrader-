@@ -3,15 +3,22 @@ import { supabase } from './supabaseAdmin.js'
 
 export type SnapshotCategory = 'day_trade' | 'swing'
 
+export interface SnapshotBarExtras {
+  vwap?: number | null
+  open?: number | null
+  high?: number | null
+  low?: number | null
+}
+
 export const recordSnapshot = async (
   symbol: string,
   category: SnapshotCategory,
   closes: number[],
-  vwap: number | null = null,
-  high: number | null = null,
-  low: number | null = null
+  extras: SnapshotBarExtras = {}
 ) => {
   if (closes.length < 26) return
+
+  const { vwap = null, open = null, high = null, low = null } = extras
 
   const rsiValues = calculateRSI(closes, 14)
   const macdData = calculateMACD(closes)
@@ -23,6 +30,7 @@ export const recordSnapshot = async (
     symbol,
     category,
     close_price: closes[closes.length - 1],
+    open_price: open,
     high_price: high,
     low_price: low,
     rsi: rsiValues[rsiValues.length - 1] ?? null,
