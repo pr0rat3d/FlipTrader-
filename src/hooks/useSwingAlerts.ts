@@ -33,6 +33,10 @@ export const useSwingAlerts = () => {
             : [payload.new, ...prev]
           return [...next].sort((a, b) => new Date(b.oversold_date).getTime() - new Date(a.oversold_date).getTime())
         })
+      } else if (payload.eventType === 'DELETE') {
+        // Symbol is no longer oversold (see scan-swings.ts) - fall off the list
+        // immediately rather than waiting for a manual refresh.
+        setAlerts(prev => prev.filter(a => a.id !== payload.old.id))
       }
     })
 

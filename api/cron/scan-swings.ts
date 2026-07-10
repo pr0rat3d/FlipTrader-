@@ -88,6 +88,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             )
           }
         }
+      } else {
+        // No longer oversold - fall off the list rather than sit there showing a
+        // stale RSI from whenever it last triggered.
+        await supabase.from('swing_trade_alerts').delete().eq('symbol', symbol)
       }
     }
 
