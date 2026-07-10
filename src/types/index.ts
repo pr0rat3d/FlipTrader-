@@ -10,13 +10,27 @@ export interface Candle {
 export interface Alert {
   id: string;
   symbol: string;
-  ttf_status: 'TTF' | 'DTF' | 'STF';
-  rsi_divergence: 'bullish' | 'bearish';
+  // 'IV' is the earlier momentum-only signal (MACD curl + support/resistance
+  // confluence, no RSI divergence) - fires before TTF/DTF/STF's full confirmation.
+  ttf_status: 'TTF' | 'DTF' | 'STF' | 'IV';
+  rsi_divergence: 'bullish' | 'bearish' | null; // null for IV alerts
   macd_curl: 'bullish' | 'bearish';
   indices_triggered: string[];
   entry_price: number;
   entry_time: string;
   target_50ema: number;
+  // IV-specific fields
+  confluence_type?: 'pdh_rejection' | 'pdl_bounce' | 'or_rejection' | 'gap_fill_target' | null;
+  confluence_level?: number | null;
+  confidence?: number | null;
+  // Support/resistance levels - populated whenever available, not IV-exclusive
+  pdh?: number | null;
+  pdl?: number | null;
+  pdc?: number | null;
+  orh?: number | null;
+  orl?: number | null;
+  gap_up?: boolean | null;
+  gap_down?: boolean | null;
   top_bottom_pattern?: string;
   timestamp: string;
   created_at: string;

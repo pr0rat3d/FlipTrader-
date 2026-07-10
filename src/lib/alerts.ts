@@ -5,14 +5,16 @@ export const tierAlert = (indicesTriggered: string[]): 'TTF' | 'DTF' | 'STF' => 
   return 'STF'
 }
 
-export const getTierColor = (tier: 'TTF' | 'DTF' | 'STF'): string => {
+export const getTierColor = (tier: 'TTF' | 'DTF' | 'STF' | 'IV'): string => {
   if (tier === 'TTF') return '#10b981' // green
   if (tier === 'DTF') return '#f59e0b' // yellow
-  return '#ef4444' // red
+  if (tier === 'IV') return '#8b5cf6' // purple - early momentum, distinct from confluence tiers
+  return '#ef4444' // red (STF)
 }
 
-export const getTierLabel = (tier: 'TTF' | 'DTF' | 'STF'): string => {
+export const getTierLabel = (tier: 'TTF' | 'DTF' | 'STF' | 'IV'): string => {
   if (tier === 'TTF') return 'Triple - Strong'
   if (tier === 'DTF') return 'Double - Good'
+  if (tier === 'IV') return 'Momentum Entry'
   return 'Single - Weak'
 }
