@@ -24,7 +24,15 @@ export const useIndicatorSnapshots = (symbol: string) => {
     fetchSnapshots()
 
     const subscription = subscribeToIndicatorSnapshots(symbol, (payload: any) => {
-      setSnapshots(prev => [...prev, payload.new].slice(-60))
+      setSnapshots(prev => {
+        // Swing snapshots update an existing row in place once per day (see
+        // snapshot.ts) rather than always inserting - reflect that as an in-place
+        // replace, not an appended duplicate.
+        if (payload.eventType === 'UPDATE' && prev.some(s => s.id === payload.new.id)) {
+          return prev.map(s => (s.id === payload.new.id ? payload.new : s))
+        }
+        return [...prev, payload.new].slice(-60)
+      })
     })
 
     return () => {
