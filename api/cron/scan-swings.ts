@@ -10,20 +10,19 @@ import { pickBatch } from '../../server/batching.js'
 import { getSwingUniverse } from '../../server/swingUniverse.js'
 
 // Twelve Data's free tier allows 8 credits/minute account-wide, shared with
-// scan-day-trades.ts (3 credits, every 5 min during market hours). This job's
-// cron-job.org schedule is offset (7,22,37,52 * * * *) so it never lands on
-// the same wall-clock minute as the day-trade job's */5 grid - 7 mod 5 = 2,
-// and adding 15 repeatedly never changes that residue, so the offset holds
-// permanently. 6 total budget here (well under the remaining 8-3=5... actually
-// this job never overlaps the day-trade job at all, so its full 8-credit
-// budget is technically available, but staying at 6 leaves headroom against
-// scheduler jitter).
+// scan-confluence.ts (3 credits, but that one now runs every single minute -
+// see that file) and scan-day-trades.ts (5 credits, every 5 min). Since
+// scan-confluence.ts fires every minute, this job's 3+6=9 credits would have
+// exceeded the cap on whichever minute the two coincided - reduced from 6 to 5
+// so 3 (confluence, always present) + 5 (this) = 8, the safe ceiling, regardless
+// of timing. The 7,22,37,52 offset still avoids colliding with scan-day-trades.ts's
+// */5 grid (7 mod 5 = 2, permanent), keeping the worst case at exactly 8, never 13.
 //
 // Twelve Data's daily interval only updates once/day, so running this more
 // often than daily doesn't fetch fresher data - the batching exists purely to
 // cycle a >8-symbol universe through the fixed per-minute credit budget. Don't
 // "optimize" this away under the belief it's about freshness.
-const BATCH_SIZE = 6
+const BATCH_SIZE = 5
 const FOLLOWED_RESERVE = 3
 const BATCH_INTERVAL_MIN = 15
 
