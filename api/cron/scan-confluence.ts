@@ -24,6 +24,12 @@ import { detectIVSignal } from '../../server/signalDetection.js'
 // even in the worst case where both land in the same minute.
 const CONFLUENCE_INDICES = ['SPY', 'QQQ', 'IWM']
 
+// Below this, an alert still gets recorded (and tracked in Performance) but doesn't
+// push a notification - filters out the single weakest tier from each signal family
+// (STF's 0.55, and IV's weakest 2-index gap-fill case at 0.585) while still notifying
+// on everything else. Adjust freely; nothing downstream depends on this exact value.
+const NOTIFICATION_CONFIDENCE_THRESHOLD = 0.6
+
 interface PerSymbolSignal {
   symbol: string
   rsiDivergence: string | null
@@ -77,6 +83,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (signalResults.length > 0) {
       fullConfluenceFired = true
       const ttfStatus = triggeredIndices.length === 3 ? 'TTF' : triggeredIndices.length === 2 ? 'DTF' : 'STF'
+      // Same confidence scale the user's original spec proposed for full confluence -
+      // scales with how many indices agree, same idea as IV's index-count scaling.
+      const confidence = ttfStatus === 'TTF' ? 0.95 : ttfStatus === 'DTF' ? 0.75 : 0.55
       const representative = signalResults[0]
       const entryTime = new Date()
 
@@ -91,6 +100,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           entry_price: representative.entryPrice,
           entry_time: entryTime,
           target_50ema: representative.target50EMA,
+          confidence,
           timestamp: entryTime
         })
         .select()
@@ -116,15 +126,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           })
         )
 
-        const legLines = signalResults
-          .map(r => `${r.symbol} $${r.entryPrice.toFixed(2)} -> $${r.target50EMA.toFixed(2)}`)
-          .join(', ')
+        if (confidence >= NOTIFICATION_CONFIDENCE_THRESHOLD) {
+          const legLines = signalResults
+            .map(r => `${r.symbol} $${r.entryPrice.toFixed(2)} -> $${r.target50EMA.toFixed(2)}`)
+            .join(', ')
 
-        await sendToTopic(
-          ALERTS_TOPIC,
-          `${ttfStatus} Alert: ${triggeredIndices.join('/')}`,
-          `${representative.rsiDivergence === 'bullish' ? 'Bullish' : 'Bearish'} reversal - ${legLines}`
-        )
+          await sendToTopic(
+            ALERTS_TOPIC,
+            `${ttfStatus} Alert: ${triggeredIndices.join('/')}`,
+            `${representative.rsiDivergence === 'bullish' ? 'Bullish' : 'Bearish'} reversal - ${legLines}`
+          )
+        }
       }
     }
 
@@ -194,11 +206,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           ivFired = direction
 
-          await sendToTopic(
-            ALERTS_TOPIC,
-            `IV Alert: ${ivIndices.join('/')}`,
-            `${direction === 'bullish' ? 'Bullish' : 'Bearish'} momentum - ${ivResult.confluenceType} at $${ivResult.confluenceLevel.toFixed(2)}`
-          )
+          if (ivResult.confidence >= NOTIFICATION_CONFIDENCE_THRESHOLD) {
+            await sendToTopic(
+              ALERTS_TOPIC,
+              `IV Alert: ${ivIndices.join('/')}`,
+              `${direction === 'bullish' ? 'Bullish' : 'Bearish'} momentum - ${ivResult.confluenceType} at $${ivResult.confluenceLevel.toFixed(2)}`
+            )
+          }
         }
       }
     }

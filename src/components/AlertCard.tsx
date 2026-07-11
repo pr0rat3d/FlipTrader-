@@ -48,6 +48,18 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert }) => {
         </p>
       </div>
 
+      {alert.confidence != null && (
+        <div className="flex items-center mb-2" style={{ gap: 8 }}>
+          <span className="text-xs text-gray-400" style={{ width: 66, flexShrink: 0 }}>Confidence</span>
+          <div style={{ flex: 1, background: '#374151', borderRadius: 3, height: 8, overflow: 'hidden' }}>
+            <div style={{ width: `${Math.round(alert.confidence * 100)}%`, background: tierColor, height: '100%' }} />
+          </div>
+          <span className="text-xs text-white font-bold" style={{ width: 36, textAlign: 'right', flexShrink: 0 }}>
+            {Math.round(alert.confidence * 100)}%
+          </span>
+        </div>
+      )}
+
       <div className="bg-gray-700 p-2 rounded mb-2 text-xs">
         <p className="text-gray-300 mb-1">
           {isIV ? (

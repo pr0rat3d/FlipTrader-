@@ -106,6 +106,79 @@ const TierCard: React.FC<{ stats: TierStats }> = ({ stats }) => {
   )
 }
 
+type ConfidenceBucket = 'high' | 'medium' | 'low'
+const CONFIDENCE_BUCKETS: ConfidenceBucket[] = ['high', 'medium', 'low']
+
+const bucketLabel = (bucket: ConfidenceBucket): string => {
+  if (bucket === 'high') return 'High (≥80%)'
+  if (bucket === 'medium') return 'Medium (60-80%)'
+  return 'Low (<60%)'
+}
+
+const bucketFor = (confidence: number): ConfidenceBucket => {
+  if (confidence >= 0.8) return 'high'
+  if (confidence >= 0.6) return 'medium'
+  return 'low'
+}
+
+interface ConfidenceBucketStats {
+  bucket: ConfidenceBucket
+  totalLegs: number
+  resolvedLegs: number
+  targetHit: number
+  targetHitPct: number
+  avgMaxFavorablePct: number | null
+}
+
+const computeConfidenceBucketStats = (bucket: ConfidenceBucket, legs: ProfitTarget[]): ConfidenceBucketStats => {
+  const totalLegs = legs.length
+  const targetHit = legs.filter(l => l.status === 'target_hit').length
+  const expired = legs.filter(l => l.status === 'expired').length
+  const resolvedLegs = targetHit + expired
+
+  const favorableValues = legs.map(l => l.max_favorable_pct).filter((v): v is number => v !== null)
+  const avgMaxFavorablePct = favorableValues.length > 0
+    ? favorableValues.reduce((a, b) => a + b, 0) / favorableValues.length
+    : null
+
+  return {
+    bucket,
+    totalLegs,
+    resolvedLegs,
+    targetHit,
+    targetHitPct: resolvedLegs > 0 ? (targetHit / resolvedLegs) * 100 : 0,
+    avgMaxFavorablePct
+  }
+}
+
+const ConfidenceBucketCard: React.FC<{ stats: ConfidenceBucketStats }> = ({ stats }) => (
+  <div className="p-3 bg-gray-800 rounded mb-2">
+    <div className="flex justify-between items-center mb-1">
+      <h4 className="text-sm font-bold text-white">{bucketLabel(stats.bucket)}</h4>
+      <span className="text-xs text-gray-400">{stats.totalLegs} signal{stats.totalLegs !== 1 ? 's' : ''}</span>
+    </div>
+    {stats.totalLegs === 0 ? (
+      <p className="text-xs text-gray-400">No signals recorded yet in this range.</p>
+    ) : (
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <p className="text-xs text-gray-400">Target-hit rate</p>
+          <p className="text-sm font-bold text-white">
+            {stats.resolvedLegs > 0 ? `${stats.targetHitPct.toFixed(0)}%` : '—'}
+            <span className="text-xs text-gray-400"> ({stats.targetHit}/{stats.resolvedLegs})</span>
+          </p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-400">Avg max favorable move</p>
+          <p className="text-sm font-bold text-white">
+            {stats.avgMaxFavorablePct !== null ? `${stats.avgMaxFavorablePct.toFixed(1)}%` : '—'}
+          </p>
+        </div>
+      </div>
+    )}
+  </div>
+)
+
 const statusLabel = (status: ProfitTarget['status']) => {
   if (status === 'target_hit') return { text: 'Target hit', color: '#4ade80' }
   if (status === 'expired') return { text: 'Expired', color: '#f87171' }
@@ -163,12 +236,32 @@ export const Performance: React.FC = () => {
     return map
   }, [alerts])
 
+  const alertConfidenceById = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const alert of alerts) {
+      if (alert.confidence != null) map.set(alert.id, alert.confidence)
+    }
+    return map
+  }, [alerts])
+
   const tierStats = useMemo(() => {
     return TIERS.map(tier => {
       const legs = profitTargets.filter(pt => alertTierById.get(pt.day_trade_alert_id) === tier)
       return computeTierStats(tier, legs)
     })
   }, [profitTargets, alertTierById])
+
+  // Does the a-priori confidence score (computed at signal time) actually predict
+  // real outcomes? Buckets every resolved/open leg by its alert's confidence,
+  // independent of tier - a high-confidence STF and a high-confidence TTF land in
+  // the same bucket here.
+  const confidenceBucketStats = useMemo(() => {
+    const legsWithConfidence = profitTargets.filter(pt => alertConfidenceById.has(pt.day_trade_alert_id))
+    return CONFIDENCE_BUCKETS.map(bucket => {
+      const legs = legsWithConfidence.filter(pt => bucketFor(alertConfidenceById.get(pt.day_trade_alert_id)!) === bucket)
+      return computeConfidenceBucketStats(bucket, legs)
+    })
+  }, [profitTargets, alertConfidenceById])
 
   const recentLegs = useMemo(
     () => [...profitTargets].sort((a, b) => new Date(b.entry_time).getTime() - new Date(a.entry_time).getTime()).slice(0, 30),
@@ -198,12 +291,19 @@ export const Performance: React.FC = () => {
         <>
           {tierStats.map(stats => <TierCard key={stats.tier} stats={stats} />)}
 
+          <h3 className="text-lg font-bold text-white mb-2 mt-4">Confidence Calibration</h3>
+          <p className="text-xs text-gray-400 mb-2">
+            Does the confidence score computed at signal time actually predict outcomes?
+            Grouped by confidence range regardless of tier.
+          </p>
+          {confidenceBucketStats.map(stats => <ConfidenceBucketCard key={stats.bucket} stats={stats} />)}
+
           <h3 className="text-lg font-bold text-white mb-2 mt-4">Recent Signals</h3>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
-                  {['Time', 'Symbol', 'Entry', 'Target', 'Max Favorable', 'Status'].map(h => (
+                  {['Time', 'Symbol', 'Entry', 'Target', 'Confidence', 'Max Favorable', 'Status'].map(h => (
                     <th key={h} className="text-xs text-gray-400" style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #374151' }}>
                       {h}
                     </th>
@@ -213,12 +313,16 @@ export const Performance: React.FC = () => {
               <tbody>
                 {recentLegs.map(leg => {
                   const status = statusLabel(leg.status)
+                  const confidence = alertConfidenceById.get(leg.day_trade_alert_id)
                   return (
                     <tr key={leg.id}>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>{timeLabel(leg.entry_time)}</td>
                       <td className="text-xs text-white font-bold" style={{ padding: '4px 8px' }}>{leg.symbol}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(leg.entry_price)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(leg.target_50ema_price)}</td>
+                      <td className="text-xs text-white" style={{ padding: '4px 8px' }}>
+                        {confidence != null ? `${Math.round(confidence * 100)}%` : '—'}
+                      </td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>
                         {leg.max_favorable_pct !== null ? `${leg.max_favorable_pct.toFixed(1)}%` : '—'}
                       </td>

@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useMemo, useState } from 'react'
 import { useAlerts } from '../hooks/useAlerts'
 import { useSwingAlerts } from '../hooks/useSwingAlerts'
 import { AlertCard } from './AlertCard'
@@ -7,10 +7,36 @@ import { SwingAlertCard } from './SwingAlertCard'
 export const Dashboard: React.FC = () => {
   const { alerts, loading } = useAlerts()
   const { alerts: swingAlerts, loading: swingLoading } = useSwingAlerts()
+  const [sortBy, setSortBy] = useState<'recent' | 'confidence'>('recent')
+
+  const sortedAlerts = useMemo(() => {
+    if (sortBy === 'recent') return alerts
+    // Alerts without a confidence score (shouldn't happen going forward, but
+    // guards older rows) sort to the back rather than being treated as 0.
+    return [...alerts].sort((a, b) => (b.confidence ?? -1) - (a.confidence ?? -1))
+  }, [alerts, sortBy])
 
   return (
     <div className="p-4">
-      <h1 className="text-3xl font-bold text-white mb-6">FlipTrader Alerts</h1>
+      <div className="flex justify-between items-center mb-6" style={{ flexWrap: 'wrap', gap: 8 }}>
+        <h1 className="text-3xl font-bold text-white">FlipTrader Alerts</h1>
+        {alerts.length > 1 && (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setSortBy('recent')}
+              className={`px-3 py-1 rounded text-sm font-bold ${sortBy === 'recent' ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-400'}`}
+            >
+              Recent
+            </button>
+            <button
+              onClick={() => setSortBy('confidence')}
+              className={`px-3 py-1 rounded text-sm font-bold ${sortBy === 'confidence' ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-400'}`}
+            >
+              Confidence
+            </button>
+          </div>
+        )}
+      </div>
 
       {loading && <p className="text-gray-400">Loading alerts...</p>}
 
@@ -19,7 +45,7 @@ export const Dashboard: React.FC = () => {
       )}
 
       <div className="space-y-2 mb-6">
-        {alerts.map(alert => (
+        {sortedAlerts.map(alert => (
           <AlertCard key={alert.id} alert={alert} />
         ))}
       </div>
