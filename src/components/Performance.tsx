@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { getAlerts, getProfitTargets } from '../lib/supabase'
+import { getAlerts, getProfitTargets, subscribeToAlerts, subscribeToProfitTargets } from '../lib/supabase'
 import { getTierColor, getTierLabel } from '../lib/alerts'
 import { Alert, ProfitTarget } from '../types'
 import { fmt, timeLabel } from './charts/ChartPrimitives'
@@ -130,6 +130,31 @@ export const Performance: React.FC = () => {
       }
     }
     load()
+
+    // Live updates - a milestone/target hit while this page is open (track-profit-
+    // targets.ts runs every minute) should reflect immediately, not require a reload.
+    const alertSub = subscribeToAlerts((payload: any) => {
+      if (payload.eventType === 'INSERT') {
+        setAlerts(prev => [payload.new, ...prev])
+      }
+    })
+
+    const targetSub = subscribeToProfitTargets((payload: any) => {
+      if (payload.eventType === 'INSERT') {
+        setProfitTargets(prev => [payload.new, ...prev])
+      } else if (payload.eventType === 'UPDATE') {
+        setProfitTargets(prev =>
+          prev.some(pt => pt.id === payload.new.id)
+            ? prev.map(pt => (pt.id === payload.new.id ? payload.new : pt))
+            : [payload.new, ...prev]
+        )
+      }
+    })
+
+    return () => {
+      alertSub.unsubscribe()
+      targetSub.unsubscribe()
+    }
   }, [])
 
   const alertTierById = useMemo(() => {

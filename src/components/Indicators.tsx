@@ -21,12 +21,18 @@ interface ChartsProps {
   xLabels: string[]
 }
 
-const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, xLabels, hoveredIndex, onHover }) => {
+// Day-trade has many intraday bars per day, where Heikin-Ashi's smoothing is
+// meaningful. Swing is deduped to one bar per trading day (see snapshot.ts) - a
+// single daily candle per day doesn't benefit from HA smoothing the way a run of
+// 5-min bars does, so swing reverts to a plain close-price trend line instead.
+const PriceChart: React.FC<ChartsProps & { category: 'day_trade' | 'swing'; hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, xLabels, category, hoveredIndex, onHover }) => {
   const n = snapshots.length
+  const closes = snapshots.map(s => s.close_price)
   const ema50s = snapshots.map(s => s.ema_50 ?? NaN)
   const ema200s = snapshots.map(s => s.ema_200 ?? NaN)
   const vwaps = snapshots.map(s => s.vwap ?? NaN)
   const hasVwap = vwaps.some(Number.isFinite)
+  const isDayTrade = category === 'day_trade'
 
   // A snapshot recorded before OHLC capture existed (open_price/high_price/low_price
   // were added later) has no candle - null keeps it index-aligned with everything
@@ -36,10 +42,10 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
       ? { open: s.open_price, high: s.high_price, low: s.low_price, close: s.close_price }
       : null
   )
-  const haBars = useMemo(() => toHeikinAshi(rawBars), [snapshots])
+  const haBars = useMemo(() => (isDayTrade ? toHeikinAshi(rawBars) : []), [snapshots, isDayTrade])
   const haHighLows = haBars.flatMap(b => (b ? [b.high, b.low] : []))
 
-  const y = buildYScale([...haHighLows, ...ema50s, ...ema200s, ...(hasVwap ? vwaps : [])].filter(Number.isFinite))
+  const y = buildYScale([...(isDayTrade ? haHighLows : closes), ...ema50s, ...ema200s, ...(hasVwap ? vwaps : [])].filter(Number.isFinite))
 
   const toPoints = (vals: number[]) => vals.map((v, i) => (Number.isFinite(v) ? { x: xScale(i, n), y: y(v) } : null))
 
@@ -50,23 +56,27 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
 
   const tooltipRows: TooltipRow[] = hoveredIndex !== null && hovered
     ? [
-        ...(hoveredHA
+        ...(isDayTrade && hoveredHA
           ? [
               { label: 'O', value: `$${fmt(hoveredHA.open)}`, color: haColor },
               { label: 'H', value: `$${fmt(hoveredHA.high)}`, color: haColor },
               { label: 'L', value: `$${fmt(hoveredHA.low)}`, color: haColor },
               { label: 'C', value: `$${fmt(hoveredHA.close)}`, color: haColor }
             ]
-          : [{ label: 'Close', value: `$${fmt(hovered.close_price)}`, color: COLOR_MUTED }]),
+          : [{ label: 'Close', value: `$${fmt(hovered.close_price)}`, color: COLOR_CLOSE }]),
         { label: 'EMA50', value: `$${fmt(hovered.ema_50)}`, color: COLOR_EMA50 },
         { label: 'EMA200', value: `$${fmt(hovered.ema_200)}`, color: COLOR_EMA200 },
         ...(hasVwap ? [{ label: 'VWAP', value: `$${fmt(hovered.vwap)}`, color: COLOR_VWAP }] : [])
       ]
     : []
 
+  const title = isDayTrade
+    ? (hasVwap ? 'Heikin-Ashi vs EMA50 / EMA200 / VWAP' : 'Heikin-Ashi vs EMA50 / EMA200')
+    : 'Price vs EMA50 / EMA200'
+
   return (
     <ChartFrame
-      title={hasVwap ? 'Heikin-Ashi vs EMA50 / EMA200 / VWAP' : 'Heikin-Ashi vs EMA50 / EMA200'}
+      title={title}
       hoveredIndex={hoveredIndex}
       onHover={onHover}
       n={n}
@@ -74,7 +84,9 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
       tooltipRows={tooltipRows}
       legend={
         <div className="flex items-center" style={{ flexWrap: 'wrap' }}>
-          <LegendItem color={haColor} label="HA Close" value={`$${fmt(hoveredHA?.close)}`} />
+          {isDayTrade
+            ? <LegendItem color={haColor} label="HA Close" value={`$${fmt(hoveredHA?.close)}`} />
+            : <LegendItem color={COLOR_CLOSE} label="Close" value={`$${fmt(hovered?.close_price)}`} />}
           <LegendItem color={COLOR_EMA50} label="EMA50" value={`$${fmt(hovered?.ema_50)}`} />
           <LegendItem color={COLOR_EMA200} label="EMA200" value={`$${fmt(hovered?.ema_200)}`} />
           {hasVwap && <LegendItem color={COLOR_VWAP} label="VWAP" value={`$${fmt(hovered?.vwap)}`} />}
@@ -88,7 +100,16 @@ const PriceChart: React.FC<ChartsProps & { hoveredIndex: number | null; onHover:
       {hasVwap && (
         <path d={linePath(toPoints(vwaps))} fill="none" stroke={COLOR_VWAP} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       )}
-      <CandlestickSeries bars={haBars} y={y} />
+      {isDayTrade ? (
+        <CandlestickSeries bars={haBars} y={y} />
+      ) : (
+        <>
+          <path d={linePath(toPoints(closes))} fill="none" stroke={COLOR_CLOSE} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+          {n > 0 && Number.isFinite(closes[n - 1]) && (
+            <circle cx={xScale(n - 1, n)} cy={y(closes[n - 1])} r={4} fill={COLOR_CLOSE} stroke="#1f2937" strokeWidth={2} />
+          )}
+        </>
+      )}
     </ChartFrame>
   )
 }
@@ -320,7 +341,7 @@ export const Indicators: React.FC = () => {
             </h3>
             <span className="text-lg font-bold" style={{ color: COLOR_CLOSE }}>${fmt(snapshots[snapshots.length - 1]?.close_price)}</span>
           </div>
-          <PriceChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
+          <PriceChart snapshots={snapshots} xLabels={xLabels} category={category} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <RSIChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <MACDChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
 
