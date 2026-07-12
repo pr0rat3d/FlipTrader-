@@ -10,8 +10,10 @@ import { recordSnapshot } from '../../server/snapshot.js'
 import { calculateSessionVWAP } from '../../server/vwap.js'
 import { calculateATR } from '../../src/lib/technicalIndicators.js'
 import { deriveMilestonePrices } from '../../server/alertOutcomes.js'
-import { getSupportResistanceLevels } from '../../server/supportResistance.js'
+import { getSupportResistanceLevels, getDailyLevels } from '../../server/supportResistance.js'
 import { detectIVSignal } from '../../server/signalDetection.js'
+import { detectCandlestickPattern } from '../../server/candlestickPatterns.js'
+import { applyConfidenceModifiers } from '../../server/confidenceModifiers.js'
 
 // Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
 // day-trading default, not load-bearing anywhere downstream, easy to tune.
@@ -97,9 +99,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const ttfStatus = triggeredIndices.length === 3 ? 'TTF' : triggeredIndices.length === 2 ? 'DTF' : 'STF'
       // Same confidence scale the user's original spec proposed for full confluence -
       // scales with how many indices agree, same idea as IV's index-count scaling.
-      const confidence = ttfStatus === 'TTF' ? 0.95 : ttfStatus === 'DTF' ? 0.75 : 0.55
+      const baseConfidence = ttfStatus === 'TTF' ? 0.95 : ttfStatus === 'DTF' ? 0.75 : 0.55
       const representative = signalResults[0]
       const entryTime = new Date()
+
+      // Layer in daily-trend alignment, same-bar candlestick confluence, and
+      // session-timing quality on top of the tier-based base confidence.
+      const dailyLevels = await getDailyLevels(representative.symbol)
+      const patternMatch = detectCandlestickPattern(representative.candles)
+      const confidence = applyConfidenceModifiers(baseConfidence, {
+        direction: representative.rsiDivergence as 'bullish' | 'bearish',
+        dailyEma50: dailyLevels?.dailyEma50 ?? null,
+        dailyEma200: dailyLevels?.dailyEma200 ?? null,
+        candlestickDirection: patternMatch?.direction ?? null,
+        now: entryTime
+      })
 
       const { data, error } = await supabase
         .from('day_trade_alerts')
@@ -174,6 +188,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const ivIndices = directional.map(s => s.symbol)
         const entryTime = new Date()
 
+        // Same three modifiers as the full-confluence path - daily trend, same-bar
+        // candlestick confluence, and session-timing quality on top of IV's own
+        // S/R-tier and index-count base confidence.
+        const patternMatch = detectCandlestickPattern(representative.candles)
+        const confidence = applyConfidenceModifiers(ivResult.confidence, {
+          direction,
+          dailyEma50: levels.dailyEma50,
+          dailyEma200: levels.dailyEma200,
+          candlestickDirection: patternMatch?.direction ?? null,
+          now: entryTime
+        })
+
         const { data, error } = await supabase
           .from('day_trade_alerts')
           .insert({
@@ -187,7 +213,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             target_50ema: representative.target50EMA,
             confluence_type: ivResult.confluenceType,
             confluence_level: ivResult.confluenceLevel,
-            confidence: ivResult.confidence,
+            confidence,
             pdh: levels.pdh,
             pdl: levels.pdl,
             pdc: levels.pdc,
@@ -222,7 +248,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
           ivFired = direction
 
-          if (ivResult.confidence >= NOTIFICATION_CONFIDENCE_THRESHOLD) {
+          if (confidence >= NOTIFICATION_CONFIDENCE_THRESHOLD) {
             await sendToTopic(
               ALERTS_TOPIC,
               `IV Alert: ${ivIndices.join('/')}`,

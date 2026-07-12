@@ -1,6 +1,7 @@
 import { Candle, getDailyCandles } from './twelvedata.js'
 import { nyDateKey } from './marketHours.js'
 import { supabase } from './supabaseAdmin.js'
+import { calculateEMA } from '../src/lib/technicalIndicators.js'
 
 export interface SupportResistanceLevels {
   pdh: number | null
@@ -10,6 +11,8 @@ export interface SupportResistanceLevels {
   orl: number | null
   gapUp: boolean
   gapDown: boolean
+  dailyEma50: number | null
+  dailyEma200: number | null
 }
 
 export interface DailyLevels {
@@ -17,11 +20,17 @@ export interface DailyLevels {
   pdl: number
   pdc: number
   avgVolume20d: number | null
+  dailyEma50: number | null
+  dailyEma200: number | null
 }
 
 const GAP_THRESHOLD_PCT = 0.001 // 0.1%
 const OPENING_RANGE_MINUTES = 15
 const VOLUME_BASELINE_DAYS = 20
+// Twelve Data bills per request, not per data point returned, so fetching enough
+// history for a real daily EMA200 costs the same 1 credit as the smaller fetch
+// this used to do for just PDH/PDL/PDC/volume.
+const TREND_LOOKBACK_DAYS = 250
 
 // PDH/PDL/PDC/avgVolume20d only change once a day - cached in daily_levels so
 // IV detection and RVOL don't need a fresh daily-candle API call every run, only
@@ -38,15 +47,23 @@ export const getDailyLevels = async (
 
   const { data: cached } = await supabase
     .from('daily_levels')
-    .select('pdh, pdl, pdc, avg_volume_20d')
+    .select('pdh, pdl, pdc, avg_volume_20d, daily_ema_50, daily_ema_200')
     .eq('symbol', symbol)
     .eq('trading_date', today)
     .maybeSingle()
 
-  if (cached) return { pdh: cached.pdh, pdl: cached.pdl, pdc: cached.pdc, avgVolume20d: cached.avg_volume_20d }
+  if (cached) {
+    return {
+      pdh: cached.pdh,
+      pdl: cached.pdl,
+      pdc: cached.pdc,
+      avgVolume20d: cached.avg_volume_20d,
+      dailyEma50: cached.daily_ema_50,
+      dailyEma200: cached.daily_ema_200
+    }
+  }
 
-  // Buffer beyond 20 for weekends/holidays so we still get 20 completed trading days.
-  const candles = prefetchedDailyCandles ?? await getDailyCandles(symbol, VOLUME_BASELINE_DAYS + 10)
+  const candles = prefetchedDailyCandles ?? await getDailyCandles(symbol, TREND_LOOKBACK_DAYS)
   if (!candles || candles.length === 0) return null
 
   // Completed days strictly before today - the API's last row may be today's
@@ -60,12 +77,25 @@ export const getDailyLevels = async (
     ? Math.round(recentVolumes.reduce((a, b) => a + b, 0) / recentVolumes.length)
     : null
 
-  const levels = { pdh: priorDay.high, pdl: priorDay.low, pdc: priorDay.close, avgVolume20d }
+  const completedCloses = completedDays.map(c => c.close)
+  const dailyEma50 = completedCloses.length >= 50 ? calculateEMA(completedCloses, 50) : null
+  const dailyEma200 = completedCloses.length >= 200 ? calculateEMA(completedCloses, 200) : null
+
+  const levels = { pdh: priorDay.high, pdl: priorDay.low, pdc: priorDay.close, avgVolume20d, dailyEma50, dailyEma200 }
 
   await supabase
     .from('daily_levels')
     .upsert(
-      { symbol, trading_date: today, pdh: levels.pdh, pdl: levels.pdl, pdc: levels.pdc, avg_volume_20d: avgVolume20d },
+      {
+        symbol,
+        trading_date: today,
+        pdh: levels.pdh,
+        pdl: levels.pdl,
+        pdc: levels.pdc,
+        avg_volume_20d: avgVolume20d,
+        daily_ema_50: dailyEma50,
+        daily_ema_200: dailyEma200
+      },
       { onConflict: 'symbol,trading_date' }
     )
 
@@ -117,6 +147,8 @@ export const getSupportResistanceLevels = async (
     orh: or?.orh ?? null,
     orl: or?.orl ?? null,
     gapUp: gap.gapUp,
-    gapDown: gap.gapDown
+    gapDown: gap.gapDown,
+    dailyEma50: dailyLevels?.dailyEma50 ?? null,
+    dailyEma200: dailyLevels?.dailyEma200 ?? null
   }
 }

@@ -1,7 +1,7 @@
 const MARKET_OPEN_MINUTES = 9 * 60 + 30
 const TRADING_DAY_MINUTES = 390 // 6.5 hours
 
-const nyMinutesSinceMidnight = (d: Date): number => {
+export const nyMinutesSinceMidnight = (d: Date): number => {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     hour: 'numeric',
