@@ -5,6 +5,7 @@ import { Settings } from './components/Settings'
 import { AlertHistory } from './components/AlertHistory'
 import { Indicators } from './components/Indicators'
 import { Performance } from './components/Performance'
+import { Splash } from './components/Splash'
 import { useFirebase } from './hooks/useFirebase'
 import './index.css'
 
@@ -12,6 +13,7 @@ type Page = 'dashboard' | 'watchlist' | 'indicators' | 'performance' | 'history'
 
 export const App: React.FC = () => {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
+  const [showSplash, setShowSplash] = useState(true)
   useFirebase()
 
   const renderPage = () => {
@@ -28,6 +30,7 @@ export const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-black text-white">
+      {showSplash && <Splash onDone={() => setShowSplash(false)} />}
       <div className="min-h-[calc(100vh-60px)] pb-20">
         {renderPage()}
       </div>
