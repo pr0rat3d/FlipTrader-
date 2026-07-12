@@ -181,6 +181,8 @@ export const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hovered
             y2={CHART_HEIGHT}
             stroke={COLOR_MUTED}
             strokeWidth={1}
+            strokeDasharray="3,3"
+            opacity={0.7}
           />
         )}
         <line x1={PAD} x2={CHART_WIDTH - PAD} y1={CHART_HEIGHT} y2={CHART_HEIGHT} stroke={COLOR_GRID} strokeWidth={1} />
@@ -206,7 +208,16 @@ export const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hovered
 
 // One wick + body per bar. `bars` is index-aligned with the chart's full n (a null
 // entry - e.g. a snapshot recorded before OHLC capture existed - simply renders no
-// candle at that x position, same convention as linePath's gap handling).
+// candle at that x position, same convention as linePath's gap handling). Rounded
+// body corners and wick caps match the rounding already used on MACD's bars and
+// every line series' strokeLinecap - a flat-cornered rect/line was the one rough
+// edge left in an otherwise consistently rounded chart style. A thin body outline
+// in the chart's own background color gives adjacent candles visual separation
+// instead of solid color blocks bleeding into each other at small sizes.
+const CANDLE_BODY_RADIUS = 2
+const CANDLE_MIN_BODY_HEIGHT = 1.5
+const CANDLE_BODY_OUTLINE = '#1f2937'
+
 export const CandlestickSeries: React.FC<{ bars: Array<OHLCBar | null>; y: (v: number) => number }> = ({ bars, y }) => {
   const n = bars.length
   const barWidth = n > 1 ? Math.min(14, ((CHART_WIDTH - PAD * 2) / n) * 0.6) : 10
@@ -221,13 +232,22 @@ export const CandlestickSeries: React.FC<{ bars: Array<OHLCBar | null>; y: (v: n
         const bodyBottom = y(Math.min(bar.open, bar.close))
         return (
           <g key={i}>
-            <line x1={x} x2={x} y1={y(bar.high)} y2={y(bar.low)} stroke={color} strokeWidth={1} />
+            <line
+              x1={x} x2={x}
+              y1={y(bar.high)} y2={y(bar.low)}
+              stroke={color}
+              strokeWidth={1.25}
+              strokeLinecap="round"
+            />
             <rect
               x={x - barWidth / 2}
               y={bodyTop}
               width={barWidth}
-              height={Math.max(bodyBottom - bodyTop, 1)}
+              height={Math.max(bodyBottom - bodyTop, CANDLE_MIN_BODY_HEIGHT)}
+              rx={CANDLE_BODY_RADIUS}
               fill={color}
+              stroke={CANDLE_BODY_OUTLINE}
+              strokeWidth={0.75}
             />
           </g>
         )

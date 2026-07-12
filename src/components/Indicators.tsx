@@ -95,10 +95,12 @@ const PriceChart: React.FC<ChartsProps & { category: 'day_trade' | 'swing'; hove
     >
       <text x={PAD} y={PAD + 8} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>${fmt(y.max)}</text>
       <text x={PAD} y={CHART_HEIGHT - PAD - 2} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>${fmt(y.min)}</text>
-      <path d={linePath(toPoints(ema200s))} fill="none" stroke={COLOR_EMA200} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
-      <path d={linePath(toPoints(ema50s))} fill="none" stroke={COLOR_EMA50} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      {/* Slightly thinner and softened vs. the candles/price line below - EMAs/VWAP
+          are supporting context, not the primary visual focus of the chart. */}
+      <path d={linePath(toPoints(ema200s))} fill="none" stroke={COLOR_EMA200} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />
+      <path d={linePath(toPoints(ema50s))} fill="none" stroke={COLOR_EMA50} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />
       {hasVwap && (
-        <path d={linePath(toPoints(vwaps))} fill="none" stroke={COLOR_VWAP} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+        <path d={linePath(toPoints(vwaps))} fill="none" stroke={COLOR_VWAP} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />
       )}
       {isDayTrade ? (
         <CandlestickSeries bars={haBars} y={y} />
