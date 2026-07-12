@@ -1,4 +1,4 @@
-import { RSI, MACD } from 'technicalindicators'
+import { RSI, MACD, ATR } from 'technicalindicators'
 
 export const calculateRSI = (closes: number[], period: number = 14): number[] => {
   return RSI.calculate({ values: closes, period })
@@ -13,6 +13,10 @@ export const calculateMACD = (closes: number[]) => {
     SimpleMAOscillator: false,
     SimpleMASignal: false
   })
+}
+
+export const calculateATR = (highs: number[], lows: number[], closes: number[], period: number = 14): number[] => {
+  return ATR.calculate({ high: highs, low: lows, close: closes, period })
 }
 
 export const calculateEMA = (closes: number[], period: number): number => {

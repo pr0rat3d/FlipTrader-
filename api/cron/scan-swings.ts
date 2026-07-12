@@ -8,6 +8,7 @@ import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { recordSnapshot } from '../../server/snapshot.js'
 import { pickBatch } from '../../server/batching.js'
 import { getSwingUniverse } from '../../server/swingUniverse.js'
+import { getDailyLevels } from '../../server/supportResistance.js'
 
 // Twelve Data's free tier allows 8 credits/minute account-wide, shared with
 // scan-confluence.ts (3 credits, but that one now runs every single minute -
@@ -50,8 +51,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!candles || candles.length < 14) continue
 
       const closes = candles.map(c => c.close)
-      const latest = candles[candles.length - 1]
-      await recordSnapshot(symbol, 'swing', closes, { open: latest.open, high: latest.high, low: latest.low })
+      await recordSnapshot(symbol, 'swing', candles)
+
+      // Populates daily_levels (PDH/PDL/PDC + 20-day avg volume) for the whole swing
+      // universe, not just the day-trade confluence indices - this alone is what
+      // unlocks the gap scanner and swing RVOL, reusing the same cache-once-per-day
+      // function IV detection already relies on. Passing the candles already fetched
+      // above avoids a second API call on a cache-miss - without this, every symbol
+      // with a cold cache would silently cost 2 credits instead of 1 in this loop.
+      await getDailyLevels(symbol, candles)
 
       const rsiValues = calculateRSI(closes, 14)
       const currentRSI = rsiValues[rsiValues.length - 1]

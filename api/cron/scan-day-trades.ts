@@ -40,10 +40,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const candles = await getIntradayCandles(symbol)
       if (!candles) continue
 
-      const closes = candles.map(c => c.close)
-      const latest = candles[candles.length - 1]
       const vwap = calculateSessionVWAP(candles)
-      await recordSnapshot(symbol, 'day_trade', closes, { vwap, open: latest.open, high: latest.high, low: latest.low })
+      await recordSnapshot(symbol, 'day_trade', candles, { vwap })
     }
 
     res.status(200).json({ success: true, followedTracked: followedSymbols })

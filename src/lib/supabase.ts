@@ -162,3 +162,36 @@ export const getSectorUniverse = async () => {
   if (error) throw error
   return data
 }
+
+// Swing snapshots are deduped to one row per symbol per trading day (see
+// snapshot.ts), so a modest limit comfortably covers several recent days across
+// the whole tracked universe - grouped/sorted per symbol client-side by the caller.
+export const getRecentSwingSnapshots = async (symbols: string[], limit = 500) => {
+  if (symbols.length === 0) return []
+  const { data, error } = await supabase
+    .from('indicator_snapshots')
+    .select('*')
+    .eq('category', 'swing')
+    .in('symbol', symbols)
+    .order('timestamp', { ascending: false })
+    .limit(limit)
+
+  if (error) throw error
+  return data
+}
+
+export const getDailyLevelsForSymbols = async (symbols: string[]) => {
+  if (symbols.length === 0) return []
+  // trading_date is stored in NY calendar-day terms (server's nyDateKey) - must
+  // match that here, not a naive UTC date slice, which would be wrong for several
+  // hours around midnight UTC (e.g. evenings in the US).
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date())
+  const { data, error } = await supabase
+    .from('daily_levels')
+    .select('symbol, pdh, pdl, pdc, avg_volume_20d')
+    .in('symbol', symbols)
+    .eq('trading_date', today)
+
+  if (error) throw error
+  return data
+}

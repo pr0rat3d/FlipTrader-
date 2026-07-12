@@ -1,39 +1,44 @@
-import { calculateRSI, calculateMACD, calculateEMA } from '../src/lib/technicalIndicators.js'
+import { calculateRSI, calculateMACD, calculateEMA, calculateATR } from '../src/lib/technicalIndicators.js'
 import { supabase } from './supabaseAdmin.js'
 import { nyDateKey } from './marketHours.js'
+import { Candle } from './twelvedata.js'
 
 export type SnapshotCategory = 'day_trade' | 'swing'
 
 export interface SnapshotBarExtras {
   vwap?: number | null
-  open?: number | null
-  high?: number | null
-  low?: number | null
 }
 
 export const recordSnapshot = async (
   symbol: string,
   category: SnapshotCategory,
-  closes: number[],
+  candles: Candle[],
   extras: SnapshotBarExtras = {}
 ) => {
+  const closes = candles.map(c => c.close)
   if (closes.length < 26) return
 
-  const { vwap = null, open = null, high = null, low = null } = extras
+  const { vwap = null } = extras
+  const highs = candles.map(c => c.high)
+  const lows = candles.map(c => c.low)
+  const latest = candles[candles.length - 1]
 
   const rsiValues = calculateRSI(closes, 14)
   const macdData = calculateMACD(closes)
   const latestMacd = macdData[macdData.length - 1]
   const ema50 = calculateEMA(closes, 50)
   const ema200 = closes.length >= 200 ? calculateEMA(closes, 200) : null
+  const atrValues = calculateATR(highs, lows, closes, 14)
 
   const row = {
     symbol,
     category,
-    close_price: closes[closes.length - 1],
-    open_price: open,
-    high_price: high,
-    low_price: low,
+    close_price: latest.close,
+    open_price: latest.open,
+    high_price: latest.high,
+    low_price: latest.low,
+    volume: latest.volume,
+    atr: atrValues[atrValues.length - 1] ?? null,
     rsi: rsiValues[rsiValues.length - 1] ?? null,
     macd_line: latestMacd?.MACD ?? null,
     macd_signal: latestMacd?.signal ?? null,

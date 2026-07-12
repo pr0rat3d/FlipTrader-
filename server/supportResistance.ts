@@ -12,37 +12,62 @@ export interface SupportResistanceLevels {
   gapDown: boolean
 }
 
+export interface DailyLevels {
+  pdh: number
+  pdl: number
+  pdc: number
+  avgVolume20d: number | null
+}
+
 const GAP_THRESHOLD_PCT = 0.001 // 0.1%
 const OPENING_RANGE_MINUTES = 15
+const VOLUME_BASELINE_DAYS = 20
 
-// PDH/PDL/PDC only change once a day - cached in daily_levels so IV detection
-// doesn't need a fresh daily-candle API call every 5-min run, only once per
-// symbol per NY trading day.
-export const getDailyLevels = async (symbol: string): Promise<{ pdh: number; pdl: number; pdc: number } | null> => {
+// PDH/PDL/PDC/avgVolume20d only change once a day - cached in daily_levels so
+// IV detection and RVOL don't need a fresh daily-candle API call every run, only
+// once per symbol per NY trading day. Pass prefetchedDailyCandles when the caller
+// already has daily candles in hand (e.g. scan-swings.ts's main loop) - avoids a
+// second, redundant API call for the same symbol in the same run, which briefly
+// caused a 429 (every symbol whose cache was cold in the same batch effectively
+// doubled its credit cost).
+export const getDailyLevels = async (
+  symbol: string,
+  prefetchedDailyCandles?: Candle[] | null
+): Promise<DailyLevels | null> => {
   const today = nyDateKey(new Date())
 
   const { data: cached } = await supabase
     .from('daily_levels')
-    .select('pdh, pdl, pdc')
+    .select('pdh, pdl, pdc, avg_volume_20d')
     .eq('symbol', symbol)
     .eq('trading_date', today)
     .maybeSingle()
 
-  if (cached) return cached
+  if (cached) return { pdh: cached.pdh, pdl: cached.pdl, pdc: cached.pdc, avgVolume20d: cached.avg_volume_20d }
 
-  const candles = await getDailyCandles(symbol, 5)
+  // Buffer beyond 20 for weekends/holidays so we still get 20 completed trading days.
+  const candles = prefetchedDailyCandles ?? await getDailyCandles(symbol, VOLUME_BASELINE_DAYS + 10)
   if (!candles || candles.length === 0) return null
 
-  // Most recent COMPLETED day strictly before today - the API's last row may be
-  // today's still-forming bar.
-  const priorDay = [...candles].reverse().find(c => nyDateKey(c.datetime) !== today)
+  // Completed days strictly before today - the API's last row may be today's
+  // still-forming bar.
+  const completedDays = candles.filter(c => nyDateKey(c.datetime) !== today)
+  const priorDay = completedDays[completedDays.length - 1]
   if (!priorDay) return null
 
-  const levels = { pdh: priorDay.high, pdl: priorDay.low, pdc: priorDay.close }
+  const recentVolumes = completedDays.slice(-VOLUME_BASELINE_DAYS).map(c => c.volume)
+  const avgVolume20d = recentVolumes.length > 0
+    ? Math.round(recentVolumes.reduce((a, b) => a + b, 0) / recentVolumes.length)
+    : null
+
+  const levels = { pdh: priorDay.high, pdl: priorDay.low, pdc: priorDay.close, avgVolume20d }
 
   await supabase
     .from('daily_levels')
-    .upsert({ symbol, trading_date: today, ...levels }, { onConflict: 'symbol,trading_date' })
+    .upsert(
+      { symbol, trading_date: today, pdh: levels.pdh, pdl: levels.pdl, pdc: levels.pdc, avg_volume_20d: avgVolume20d },
+      { onConflict: 'symbol,trading_date' }
+    )
 
   return levels
 }

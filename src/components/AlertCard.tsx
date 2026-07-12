@@ -98,6 +98,16 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert }) => {
                 <div className="grid grid-cols-2 gap-2 text-xs mt-1">
                   <span className="text-gray-400">Entry <span className="text-white font-bold">${leg.entry_price.toFixed(2)}</span></span>
                   <span className="text-gray-400">Target <span className="text-white font-bold">${leg.target_50ema_price.toFixed(2)}</span></span>
+                  {leg.stop_loss_price != null && (
+                    <span className="text-gray-400">Stop <span className="text-red-400 font-bold">${leg.stop_loss_price.toFixed(2)}</span></span>
+                  )}
+                  {leg.stop_loss_price != null && (() => {
+                    const risk = Math.abs(leg.entry_price - leg.stop_loss_price)
+                    const reward = Math.abs(leg.target_50ema_price - leg.entry_price)
+                    return risk > 0 ? (
+                      <span className="text-gray-400">R:R <span className="text-white font-bold">1:{(reward / risk).toFixed(1)}</span></span>
+                    ) : null
+                  })()}
                 </div>
               </div>
             )

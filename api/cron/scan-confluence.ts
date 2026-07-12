@@ -8,9 +8,14 @@ import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { recordSnapshot } from '../../server/snapshot.js'
 import { calculateSessionVWAP } from '../../server/vwap.js'
+import { calculateATR } from '../../src/lib/technicalIndicators.js'
 import { deriveMilestonePrices } from '../../server/alertOutcomes.js'
 import { getSupportResistanceLevels } from '../../server/supportResistance.js'
 import { detectIVSignal } from '../../server/signalDetection.js'
+
+// Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
+// day-trading default, not load-bearing anywhere downstream, easy to tune.
+const ATR_STOP_MULTIPLIER = 1.5
 
 // Split out from scan-day-trades.ts so the latency-sensitive TTF/DTF/STF/IV
 // detection can run on its own fast schedule (every 1 min - 3 credits/min, well
@@ -36,7 +41,13 @@ interface PerSymbolSignal {
   macdCurl: string | null
   entryPrice: number
   target50EMA: number
+  atr: number | null
   candles: Candle[]
+}
+
+const stopLossFor = (direction: 'bullish' | 'bearish', entryPrice: number, atr: number | null): number | null => {
+  if (atr === null) return null
+  return direction === 'bullish' ? entryPrice - ATR_STOP_MULTIPLIER * atr : entryPrice + ATR_STOP_MULTIPLIER * atr
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -57,19 +68,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!candles) continue
 
       const closes = candles.map(c => c.close)
-      const latest = candles[candles.length - 1]
       const vwap = calculateSessionVWAP(candles)
-      await recordSnapshot(symbol, 'day_trade', closes, { vwap, open: latest.open, high: latest.high, low: latest.low })
+      await recordSnapshot(symbol, 'day_trade', candles, { vwap })
 
       const signal = analyzeCandles(closes)
 
       if (signal) {
+        const atrValues = calculateATR(candles.map(c => c.high), candles.map(c => c.low), closes, 14)
         perSymbolSignals.push({
           symbol,
           rsiDivergence: signal.rsiDivergence,
           macdCurl: signal.macdCurl,
           entryPrice: signal.entryPrice,
           target50EMA: signal.target50EMA,
+          atr: atrValues[atrValues.length - 1] ?? null,
           candles
         })
       }
@@ -101,6 +113,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           entry_time: entryTime,
           target_50ema: representative.target50EMA,
           confidence,
+          stop_loss_price: stopLossFor(representative.rsiDivergence as 'bullish' | 'bearish', representative.entryPrice, representative.atr),
           timestamp: entryTime
         })
         .select()
@@ -119,6 +132,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               entry_price: r.entryPrice,
               entry_time: entryTime,
               target_50ema_price: r.target50EMA,
+              stop_loss_price: stopLossFor(r.rsiDivergence as 'bullish' | 'bearish', r.entryPrice, r.atr),
               milestone_10_price: milestones.milestone10,
               milestone_20_price: milestones.milestone20,
               milestone_30_price: milestones.milestone30
@@ -181,6 +195,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             orl: levels.orl,
             gap_up: levels.gapUp,
             gap_down: levels.gapDown,
+            stop_loss_price: stopLossFor(direction, representative.entryPrice, representative.atr),
             timestamp: entryTime
           })
           .select()
@@ -197,6 +212,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
                 entry_price: s.entryPrice,
                 entry_time: entryTime,
                 target_50ema_price: s.target50EMA,
+                stop_loss_price: stopLossFor(direction, s.entryPrice, s.atr),
                 milestone_10_price: milestones.milestone10,
                 milestone_20_price: milestones.milestone20,
                 milestone_30_price: milestones.milestone30
