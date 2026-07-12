@@ -2,6 +2,7 @@ import { calculateRSI, calculateMACD, calculateEMA, calculateATR } from '../src/
 import { supabase } from './supabaseAdmin.js'
 import { nyDateKey } from './marketHours.js'
 import { Candle } from './twelvedata.js'
+import { detectCandlestickPattern } from './candlestickPatterns.js'
 
 export type SnapshotCategory = 'day_trade' | 'swing'
 
@@ -29,6 +30,7 @@ export const recordSnapshot = async (
   const ema50 = calculateEMA(closes, 50)
   const ema200 = closes.length >= 200 ? calculateEMA(closes, 200) : null
   const atrValues = calculateATR(highs, lows, closes, 14)
+  const patternMatch = detectCandlestickPattern(candles)
 
   const row = {
     symbol,
@@ -46,6 +48,8 @@ export const recordSnapshot = async (
     ema_50: ema50,
     ema_200: ema200,
     vwap,
+    candlestick_pattern: patternMatch?.pattern ?? null,
+    candlestick_direction: patternMatch?.direction ?? null,
     timestamp: new Date()
   }
 

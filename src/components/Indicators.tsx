@@ -341,6 +341,17 @@ export const Indicators: React.FC = () => {
             </h3>
             <span className="text-lg font-bold" style={{ color: COLOR_CLOSE }}>${fmt(snapshots[snapshots.length - 1]?.close_price)}</span>
           </div>
+          {snapshots[snapshots.length - 1]?.candlestick_pattern && (() => {
+            const latest = snapshots[snapshots.length - 1]
+            const color = latest.candlestick_direction === 'bullish' ? COLOR_BULLISH
+              : latest.candlestick_direction === 'bearish' ? COLOR_BEARISH
+              : COLOR_MUTED
+            return (
+              <div className="mb-3 p-2 rounded text-sm font-bold" style={{ background: '#1f2937', border: `1px solid ${color}`, color }}>
+                🕯️ {latest.candlestick_pattern}{latest.candlestick_direction !== 'neutral' && ` (${latest.candlestick_direction})`}
+              </div>
+            )
+          })()}
           <PriceChart snapshots={snapshots} xLabels={xLabels} category={category} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <RSIChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <MACDChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
@@ -361,7 +372,7 @@ export const Indicators: React.FC = () => {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    {['Time', 'Close', 'RSI', 'MACD Hist', 'EMA50', 'EMA200', 'VWAP'].map(h => (
+                    {['Time', 'Close', 'RSI', 'MACD Hist', 'EMA50', 'EMA200', 'VWAP', 'Pattern'].map(h => (
                       <th key={h} className="text-xs text-gray-400" style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #374151' }}>
                         {h}
                       </th>
@@ -378,6 +389,17 @@ export const Indicators: React.FC = () => {
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(row.ema_50)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(row.ema_200)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>{row.vwap !== null ? `$${fmt(row.vwap)}` : '—'}</td>
+                      <td
+                        className="text-xs font-bold"
+                        style={{
+                          padding: '4px 8px',
+                          color: row.candlestick_direction === 'bullish' ? COLOR_BULLISH
+                            : row.candlestick_direction === 'bearish' ? COLOR_BEARISH
+                            : COLOR_MUTED
+                        }}
+                      >
+                        {row.candlestick_pattern ?? '—'}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

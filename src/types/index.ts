@@ -99,6 +99,8 @@ export interface IndicatorSnapshot {
   ema_50: number | null;
   ema_200: number | null;
   vwap: number | null;
+  candlestick_pattern: string | null;
+  candlestick_direction: 'bullish' | 'bearish' | 'neutral' | null;
   timestamp: string;
   created_at: string;
 }
