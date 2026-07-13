@@ -3,7 +3,7 @@ import {
   bullishengulfingpattern, bearishengulfingpattern,
   piercingline, darkcloudcover,
   bullishharami, bearishharami,
-  hammerpattern, shootingstar, doji
+  hammerpattern, shootingstar
 } from 'technicalindicators'
 
 export type CandlestickDirection = 'bullish' | 'bearish' | 'neutral'
@@ -27,9 +27,16 @@ interface Detector {
 }
 
 // Checked in priority order - stronger, more specific reversal patterns first, so a
-// textbook morning star is reported as that rather than being masked by a generic
-// doji match (each detector call is independent - order only affects which single
-// match wins when more than one happens to be true for the same bars).
+// textbook morning star is reported as that rather than being masked by a weaker
+// match (each detector call is independent - order only affects which single match
+// wins when more than one happens to be true for the same bars).
+//
+// Doji is deliberately excluded: the library's open==close tolerance is 0.1% of
+// price, which on a $700+ stock is inside a ~$0.75 band - trivially satisfied by
+// countless ordinary quiet 5-min bars, not a meaningful signal. It also resolves to
+// a 'neutral' direction that applyConfidenceModifiers already ignores, so it was
+// pure display noise with no effect on confidence - removing it rather than just
+// hiding it in one view, since the same noise would show in the data table too.
 const DETECTORS: Detector[] = [
   { pattern: 'Morning Star', direction: 'bullish', fn: morningstar },
   { pattern: 'Evening Star', direction: 'bearish', fn: eveningstar },
@@ -42,8 +49,7 @@ const DETECTORS: Detector[] = [
   { pattern: 'Bullish Harami', direction: 'bullish', fn: bullishharami },
   { pattern: 'Bearish Harami', direction: 'bearish', fn: bearishharami },
   { pattern: 'Hammer', direction: 'bullish', fn: hammerpattern },
-  { pattern: 'Shooting Star', direction: 'bearish', fn: shootingstar },
-  { pattern: 'Doji', direction: 'neutral', fn: doji }
+  { pattern: 'Shooting Star', direction: 'bearish', fn: shootingstar }
 ]
 
 // Each detector internally looks only at the last N bars it needs (2-3, depending

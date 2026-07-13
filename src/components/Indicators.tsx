@@ -366,7 +366,7 @@ export const Indicators: React.FC = () => {
                   return (
                     <button
                       key={`${p.index}-${p.timestamp}`}
-                      onClick={() => setHoveredIndex(p.index)}
+                      onClick={() => setHoveredIndex(isSelected ? null : p.index)}
                       className="text-xs font-bold rounded"
                       style={{
                         display: 'inline-block',
