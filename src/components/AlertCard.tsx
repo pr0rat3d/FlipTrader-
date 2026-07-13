@@ -81,6 +81,11 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert }) => {
             Gap {alert.gap_up ? 'UP' : 'DOWN'}
           </p>
         )}
+        {alert.orb_breakout_direction && (
+          <p className={`font-bold ${alert.orb_breakout_direction === 'bullish' ? 'text-green-400' : 'text-red-400'}`}>
+            ORB: {alert.orb_breakout_direction === 'bullish' ? 'Bullish' : 'Bearish'} breakout
+          </p>
+        )}
       </div>
 
       {legs.length > 0 ? (

@@ -263,7 +263,7 @@ export const Indicators: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbols.join(',')])
 
-  const { snapshots, loading } = useIndicatorSnapshots(selectedSymbol)
+  const { snapshots, loading } = useIndicatorSnapshots(selectedSymbol, category)
   const xLabels = useMemo(() => buildXLabels(snapshots.map(s => s.timestamp)), [snapshots])
 
   const selectCategory = (next: 'day_trade' | 'swing') => {
@@ -277,6 +277,20 @@ export const Indicators: React.FC = () => {
   }
 
   const tableRows = useMemo(() => [...snapshots].reverse().slice(0, 30), [snapshots])
+
+  // Day-trade only - `snapshots` is already scoped to today for this category
+  // (see useIndicatorSnapshots), so this is naturally "today's patterns," no
+  // extra date filtering needed here.
+  const patternHistory = useMemo(() => {
+    if (category !== 'day_trade') return []
+    const rows: Array<{ index: number; pattern: string; direction: 'bullish' | 'bearish' | 'neutral'; timestamp: string }> = []
+    snapshots.forEach((s, index) => {
+      if (s.candlestick_pattern) {
+        rows.push({ index, pattern: s.candlestick_pattern, direction: s.candlestick_direction ?? 'neutral', timestamp: s.timestamp })
+      }
+    })
+    return rows
+  }, [snapshots, category])
 
   return (
     <div className="p-4">
@@ -343,17 +357,45 @@ export const Indicators: React.FC = () => {
             </h3>
             <span className="text-lg font-bold" style={{ color: COLOR_CLOSE }}>${fmt(snapshots[snapshots.length - 1]?.close_price)}</span>
           </div>
-          {snapshots[snapshots.length - 1]?.candlestick_pattern && (() => {
-            const latest = snapshots[snapshots.length - 1]
-            const color = latest.candlestick_direction === 'bullish' ? COLOR_BULLISH
-              : latest.candlestick_direction === 'bearish' ? COLOR_BEARISH
-              : COLOR_MUTED
-            return (
-              <div className="mb-3 p-2 rounded text-sm font-bold" style={{ background: '#1f2937', border: `1px solid ${color}`, color }}>
-                🕯️ {latest.candlestick_pattern}{latest.candlestick_direction !== 'neutral' && ` (${latest.candlestick_direction})`}
+          {category === 'day_trade' ? (
+            patternHistory.length > 0 && (
+              <div className="mb-3" style={{ overflowX: 'auto', whiteSpace: 'nowrap', paddingBottom: 4 }}>
+                {patternHistory.map(p => {
+                  const color = p.direction === 'bullish' ? COLOR_BULLISH : p.direction === 'bearish' ? COLOR_BEARISH : COLOR_MUTED
+                  const isSelected = hoveredIndex === p.index
+                  return (
+                    <button
+                      key={`${p.index}-${p.timestamp}`}
+                      onClick={() => setHoveredIndex(p.index)}
+                      className="text-xs font-bold rounded"
+                      style={{
+                        display: 'inline-block',
+                        marginRight: 6,
+                        padding: '4px 8px',
+                        background: isSelected ? color : '#1f2937',
+                        border: `1px solid ${color}`,
+                        color: isSelected ? '#1f2937' : color
+                      }}
+                    >
+                      🕯️ {timeLabel(p.timestamp)} {p.pattern}
+                    </button>
+                  )
+                })}
               </div>
             )
-          })()}
+          ) : (
+            snapshots[snapshots.length - 1]?.candlestick_pattern && (() => {
+              const latest = snapshots[snapshots.length - 1]
+              const color = latest.candlestick_direction === 'bullish' ? COLOR_BULLISH
+                : latest.candlestick_direction === 'bearish' ? COLOR_BEARISH
+                : COLOR_MUTED
+              return (
+                <div className="mb-3 p-2 rounded text-sm font-bold" style={{ background: '#1f2937', border: `1px solid ${color}`, color }}>
+                  🕯️ {latest.candlestick_pattern}{latest.candlestick_direction !== 'neutral' && ` (${latest.candlestick_direction})`}
+                </div>
+              )
+            })()
+          )}
           <PriceChart snapshots={snapshots} xLabels={xLabels} category={category} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <RSIChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <MACDChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />

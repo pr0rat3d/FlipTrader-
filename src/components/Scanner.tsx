@@ -14,6 +14,11 @@ interface GapRow {
   symbol: string
   gapPct: number
   fillProgressPct: number | null
+  // A gap up fills by moving DOWN toward yesterday's close (bearish), and a
+  // gap down fills by moving UP toward it (bullish) - the opposite of the
+  // gap's own direction, which is easy to misread from gapPct's sign alone.
+  fillBias: 'bullish' | 'bearish'
+  filled: boolean
 }
 
 interface MoverRow {
@@ -77,7 +82,7 @@ const GapScannerSection: React.FC<{ rows: GapRow[] }> = ({ rows }) => (
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              {['Symbol', 'Gap', 'Fill Progress'].map(h => (
+              {['Symbol', 'Gap', 'Fill Bias', 'Fill Progress'].map(h => (
                 <th key={h} className="text-xs text-gray-400" style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #374151' }}>{h}</th>
               ))}
             </tr>
@@ -87,10 +92,13 @@ const GapScannerSection: React.FC<{ rows: GapRow[] }> = ({ rows }) => (
               <tr key={row.symbol}>
                 <td className="text-xs text-white font-bold" style={{ padding: '4px 8px' }}>{row.symbol}</td>
                 <td className={`text-xs font-bold`} style={{ padding: '4px 8px', color: row.gapPct > 0 ? '#4ade80' : '#f87171' }}>
-                  {row.gapPct > 0 ? '+' : ''}{row.gapPct.toFixed(1)}%
+                  {row.gapPct > 0 ? 'Up ' : 'Down '}{row.gapPct > 0 ? '+' : ''}{row.gapPct.toFixed(1)}%
+                </td>
+                <td className="text-xs font-bold" style={{ padding: '4px 8px', color: row.fillBias === 'bullish' ? '#4ade80' : '#f87171' }}>
+                  {row.fillBias === 'bullish' ? 'Bullish (up to fill)' : 'Bearish (down to fill)'}
                 </td>
                 <td className="text-xs text-white" style={{ padding: '4px 8px' }}>
-                  {row.fillProgressPct !== null ? `${row.fillProgressPct.toFixed(0)}% filled` : '—'}
+                  {row.filled ? 'Filled' : row.fillProgressPct !== null ? `${row.fillProgressPct.toFixed(0)}% filled` : '—'}
                 </td>
               </tr>
             ))}
@@ -225,7 +233,10 @@ export const Scanner: React.FC = () => {
         ? Math.max(0, Math.min(100, (filledSoFar / totalGap) * 100))
         : null
 
-      rows.push({ symbol, gapPct, fillProgressPct })
+      const fillBias = gapPct > 0 ? 'bearish' : 'bullish'
+      const filled = gapPct > 0 ? latest.close_price <= level.pdc : latest.close_price >= level.pdc
+
+      rows.push({ symbol, gapPct, fillProgressPct, fillBias, filled })
     }
     return rows.sort((a, b) => Math.abs(b.gapPct) - Math.abs(a.gapPct))
   }, [symbols, snapshotsBySymbol, levelsBySymbol])

@@ -32,6 +32,7 @@ export interface Alert {
   gap_up?: boolean | null;
   gap_down?: boolean | null;
   stop_loss_price?: number | null;
+  orb_breakout_direction?: 'bullish' | 'bearish' | null;
   top_bottom_pattern?: string;
   timestamp: string;
   created_at: string;

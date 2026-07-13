@@ -10,10 +10,11 @@ import { recordSnapshot } from '../../server/snapshot.js'
 import { calculateSessionVWAP } from '../../server/vwap.js'
 import { calculateATR } from '../../src/lib/technicalIndicators.js'
 import { deriveMilestonePrices } from '../../server/alertOutcomes.js'
-import { getSupportResistanceLevels, getDailyLevels } from '../../server/supportResistance.js'
+import { getSupportResistanceLevels, getDailyLevels, calculateOpeningRange } from '../../server/supportResistance.js'
 import { detectIVSignal } from '../../server/signalDetection.js'
 import { detectCandlestickPattern } from '../../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../../server/confidenceModifiers.js'
+import { detectORBBreakout } from '../../server/orb.js'
 
 // Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
 // day-trading default, not load-bearing anywhere downstream, easy to tune.
@@ -107,11 +108,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // session-timing quality on top of the tier-based base confidence.
       const dailyLevels = await getDailyLevels(representative.symbol)
       const patternMatch = detectCandlestickPattern(representative.candles)
+      const openingRange = calculateOpeningRange(representative.candles)
+      const orbDirection = detectORBBreakout(representative.candles, openingRange?.orh ?? null, openingRange?.orl ?? null)
       const confidence = applyConfidenceModifiers(baseConfidence, {
         direction: representative.rsiDivergence as 'bullish' | 'bearish',
         dailyEma50: dailyLevels?.dailyEma50 ?? null,
         dailyEma200: dailyLevels?.dailyEma200 ?? null,
         candlestickDirection: patternMatch?.direction ?? null,
+        orbBreakoutDirection: orbDirection,
         now: entryTime
       })
 
@@ -128,6 +132,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           target_50ema: representative.target50EMA,
           confidence,
           stop_loss_price: stopLossFor(representative.rsiDivergence as 'bullish' | 'bearish', representative.entryPrice, representative.atr),
+          orb_breakout_direction: orbDirection,
           timestamp: entryTime
         })
         .select()
@@ -192,11 +197,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // candlestick confluence, and session-timing quality on top of IV's own
         // S/R-tier and index-count base confidence.
         const patternMatch = detectCandlestickPattern(representative.candles)
+        const orbDirection = detectORBBreakout(representative.candles, levels.orh, levels.orl)
         const confidence = applyConfidenceModifiers(ivResult.confidence, {
           direction,
           dailyEma50: levels.dailyEma50,
           dailyEma200: levels.dailyEma200,
           candlestickDirection: patternMatch?.direction ?? null,
+          orbBreakoutDirection: orbDirection,
           now: entryTime
         })
 
@@ -222,6 +229,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             gap_up: levels.gapUp,
             gap_down: levels.gapDown,
             stop_loss_price: stopLossFor(direction, representative.entryPrice, representative.atr),
+            orb_breakout_direction: orbDirection,
             timestamp: entryTime
           })
           .select()

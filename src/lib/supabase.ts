@@ -84,6 +84,56 @@ export const getIndicatorSnapshots = async (symbol: string, limit = 60) => {
   return (data || []).reverse()
 }
 
+// Minutes a timezone is offset from UTC at a given instant (positive = ahead
+// of UTC) - computed by rendering the instant's wall-clock time in that zone,
+// re-interpreting those same numbers as if they were UTC, and diffing against
+// the true UTC instant. Standard technique for converting a timezone's local
+// midnight to a UTC instant without a date library.
+const tzOffsetMinutes = (date: Date, timeZone: string): number => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  }).formatToParts(date)
+
+  const get = (type: string) => Number(parts.find(p => p.type === type)?.value)
+  const asUTC = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
+  return (asUTC - date.getTime()) / 60_000
+}
+
+// Start of the current NY calendar day, expressed as a UTC ISO timestamp.
+const startOfTodayNY = (): string => {
+  const now = new Date()
+  const offsetMinutes = tzOffsetMinutes(now, 'America/New_York')
+
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(now)
+  const get = (type: string) => Number(parts.find(p => p.type === type)?.value)
+
+  const nyMidnightAsUTCNumbers = Date.UTC(get('year'), get('month') - 1, get('day'), 0, 0, 0)
+  return new Date(nyMidnightAsUTCNumbers - offsetMinutes * 60_000).toISOString()
+}
+
+// Day-trade-specific: scoped to TODAY (NY calendar day) rather than a fixed
+// row count, so a symbol scanned every ~1 min doesn't get truncated to the
+// last hour - a clicked pattern from earlier today needs to land on a point
+// the chart actually rendered. Swing keeps using getIndicatorSnapshots (one
+// row/day, a row-count cap already spans months of history).
+export const getTodayIndicatorSnapshots = async (symbol: string, category: 'day_trade' | 'swing') => {
+  const { data, error } = await supabase
+    .from('indicator_snapshots')
+    .select('*')
+    .eq('symbol', symbol)
+    .eq('category', category)
+    .gte('timestamp', startOfTodayNY())
+    .order('timestamp', { ascending: true })
+
+  if (error) throw error
+  return data || []
+}
+
 export const subscribeToIndicatorSnapshots = (symbol: string, callback: (row: any) => void) => {
   return supabase
     .channel(`indicator_snapshots:${symbol}`)

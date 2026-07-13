@@ -33,6 +33,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const { sectorPool, followedPool, sectorBySymbol } = await getSwingUniverse()
 
+    // A symbol that drops out of the universe entirely (its sector gets
+    // deselected, or it's removed from a swing watchlist) never rotates back
+    // into `batch` below - without this, its swing_trade_alerts row would sit
+    // forever showing a stale RSI from whenever it was last actually checked,
+    // since the refresh/delete logic further down only ever touches symbols
+    // still in this run's batch. Cheap (no API cost) so it's safe to run every
+    // invocation rather than only occasionally.
+    const currentUniverse = new Set([...sectorPool, ...followedPool])
+    const { data: existingAlerts } = await supabase.from('swing_trade_alerts').select('symbol')
+    const orphanedSymbols = (existingAlerts || [])
+      .map(r => r.symbol)
+      .filter(symbol => !currentUniverse.has(symbol))
+    if (orphanedSymbols.length > 0) {
+      await supabase.from('swing_trade_alerts').delete().in('symbol', orphanedSymbols)
+    }
+
     // Reserve slots for followed symbols; backfill unused reservation with sector-pool symbols
     const followedBatch = pickBatch(followedPool, FOLLOWED_RESERVE, BATCH_INTERVAL_MIN)
     const sectorBudget = BATCH_SIZE - followedBatch.length

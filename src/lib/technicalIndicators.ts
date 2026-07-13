@@ -33,22 +33,40 @@ export const calculateEMA = (closes: number[], period: number): number => {
 }
 
 export const detectRSIDivergence = (closes: number[], rsiValues: number[]): 'bullish' | 'bearish' | null => {
-  if (closes.length < 3 || rsiValues.length < 3) return null
+  // RSI.calculate() returns fewer values than the input closes (a `period`-bar
+  // warmup with no output) - closes and rsiValues are NOT index-aligned. Both
+  // arrays' last element represents "now," so trim closes to rsiValues' length
+  // before comparing anything by index.
+  const offset = closes.length - rsiValues.length
+  if (offset < 0) return null
+  const alignedCloses = closes.slice(offset)
 
-  const n = closes.length - 1
-  const priceLowIdx = closes.lastIndexOf(Math.min(...closes.slice(-3)))
-  const priceHighIdx = closes.lastIndexOf(Math.max(...closes.slice(-3)))
+  const n = alignedCloses.length - 1
+  const lookback = Math.min(10, n)
+  if (lookback < 3) return null
 
-  const rsiLowIdx = rsiValues.lastIndexOf(Math.min(...rsiValues.slice(-3)))
-  const rsiHighIdx = rsiValues.lastIndexOf(Math.max(...rsiValues.slice(-3)))
+  // Compares the CURRENT bar against the extreme of the bars BEFORE it,
+  // excluding itself. The previous version included the current bar in the
+  // window it compared against, which made the price condition mathematically
+  // impossible to satisfy (verified empirically: 2000 random-walk trials, zero
+  // non-null results) - this is why no TTF/DTF/STF alert had ever fired.
+  const priorCloses = alignedCloses.slice(n - lookback, n)
+  const priorRSI = rsiValues.slice(n - lookback, n)
 
-  // Bullish divergence: price lower low, RSI higher low
-  if (closes[n] < closes[priceLowIdx] && rsiValues[n] > rsiValues[rsiLowIdx]) {
+  const priorLow = Math.min(...priorCloses)
+  const priorHigh = Math.max(...priorCloses)
+  const priorRSILow = Math.min(...priorRSI)
+  const priorRSIHigh = Math.max(...priorRSI)
+
+  // Bullish divergence: price makes a new low vs. the recent window, but RSI
+  // does NOT confirm with a new low - momentum weakening despite the drop.
+  if (alignedCloses[n] < priorLow && rsiValues[n] > priorRSILow) {
     return 'bullish'
   }
 
-  // Bearish divergence: price higher high, RSI lower high
-  if (closes[n] > closes[priceHighIdx] && rsiValues[n] < rsiValues[rsiHighIdx]) {
+  // Bearish divergence: price makes a new high vs. the recent window, but RSI
+  // does NOT confirm with a new high - momentum weakening despite the rise.
+  if (alignedCloses[n] > priorHigh && rsiValues[n] < priorRSIHigh) {
     return 'bearish'
   }
 

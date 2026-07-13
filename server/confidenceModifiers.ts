@@ -9,6 +9,8 @@ const TREND_ALIGNED_MULTIPLIER = 1.15
 const TREND_OPPOSED_MULTIPLIER = 0.80
 const PATTERN_ALIGNED_MULTIPLIER = 1.10
 const PATTERN_OPPOSED_MULTIPLIER = 0.90
+const ORB_ALIGNED_MULTIPLIER = 1.10
+const ORB_OPPOSED_MULTIPLIER = 0.90
 const PRIME_TIME_MULTIPLIER = 1.05
 const CHOP_ZONE_MULTIPLIER = 0.90
 const MIN_CONFIDENCE = 0.3
@@ -39,6 +41,7 @@ export interface ConfidenceModifierInputs {
   dailyEma50: number | null
   dailyEma200: number | null
   candlestickDirection: CandlestickDirection | null
+  orbBreakoutDirection: 'bullish' | 'bearish' | null
   now?: Date
 }
 
@@ -59,6 +62,11 @@ export const applyConfidenceModifiers = (baseConfidence: number, inputs: Confide
   if (inputs.candlestickDirection && inputs.candlestickDirection !== 'neutral') {
     const aligned = inputs.candlestickDirection === inputs.direction
     confidence *= aligned ? PATTERN_ALIGNED_MULTIPLIER : PATTERN_OPPOSED_MULTIPLIER
+  }
+
+  if (inputs.orbBreakoutDirection) {
+    const aligned = inputs.orbBreakoutDirection === inputs.direction
+    confidence *= aligned ? ORB_ALIGNED_MULTIPLIER : ORB_OPPOSED_MULTIPLIER
   }
 
   if (isChopZone(now)) confidence *= CHOP_ZONE_MULTIPLIER
