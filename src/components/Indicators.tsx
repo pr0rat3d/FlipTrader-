@@ -280,16 +280,28 @@ export const Indicators: React.FC = () => {
 
   // Day-trade only - `snapshots` is already scoped to today for this category
   // (see useIndicatorSnapshots), so this is naturally "today's patterns," no
-  // extra date filtering needed here.
+  // extra date filtering needed here. Consecutive bars showing the SAME pattern
+  // collapse into one run with a time range, rather than a separate tag per bar -
+  // a run only breaks when the pattern changes or a bar with no pattern falls
+  // between two matching ones (a real gap, not the same continuing occurrence).
   const patternHistory = useMemo(() => {
     if (category !== 'day_trade') return []
-    const rows: Array<{ index: number; pattern: string; direction: 'bullish' | 'bearish' | 'neutral'; timestamp: string }> = []
+    const runs: Array<{ startIndex: number; endIndex: number; pattern: string; direction: 'bullish' | 'bearish' | 'neutral'; startTimestamp: string; endTimestamp: string }> = []
     snapshots.forEach((s, index) => {
-      if (s.candlestick_pattern) {
-        rows.push({ index, pattern: s.candlestick_pattern, direction: s.candlestick_direction ?? 'neutral', timestamp: s.timestamp })
+      if (!s.candlestick_pattern) return
+      const last = runs[runs.length - 1]
+      if (last && last.pattern === s.candlestick_pattern && last.endIndex === index - 1) {
+        last.endIndex = index
+        last.endTimestamp = s.timestamp
+      } else {
+        runs.push({
+          startIndex: index, endIndex: index, pattern: s.candlestick_pattern,
+          direction: s.candlestick_direction ?? 'neutral',
+          startTimestamp: s.timestamp, endTimestamp: s.timestamp
+        })
       }
     })
-    return rows
+    return runs
   }, [snapshots, category])
 
   return (
@@ -360,13 +372,18 @@ export const Indicators: React.FC = () => {
           {category === 'day_trade' ? (
             patternHistory.length > 0 && (
               <div className="mb-3" style={{ overflowX: 'auto', whiteSpace: 'nowrap', paddingBottom: 4 }}>
-                {patternHistory.map(p => {
-                  const color = p.direction === 'bullish' ? COLOR_BULLISH : p.direction === 'bearish' ? COLOR_BEARISH : COLOR_MUTED
-                  const isSelected = hoveredIndex === p.index
+                {patternHistory.map(run => {
+                  const color = run.direction === 'bullish' ? COLOR_BULLISH : run.direction === 'bearish' ? COLOR_BEARISH : COLOR_MUTED
+                  const isSelected = hoveredIndex === run.endIndex
+                  const isRange = run.startIndex !== run.endIndex
+                  const shortTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+                  const label = isRange
+                    ? `${shortTime(run.startTimestamp)}–${shortTime(run.endTimestamp)} ${run.pattern}`
+                    : `${timeLabel(run.startTimestamp)} ${run.pattern}`
                   return (
                     <button
-                      key={`${p.index}-${p.timestamp}`}
-                      onClick={() => setHoveredIndex(isSelected ? null : p.index)}
+                      key={`${run.startIndex}-${run.endIndex}`}
+                      onClick={() => setHoveredIndex(isSelected ? null : run.endIndex)}
                       className="text-xs font-bold rounded"
                       style={{
                         display: 'inline-block',
@@ -377,7 +394,7 @@ export const Indicators: React.FC = () => {
                         color: isSelected ? '#1f2937' : color
                       }}
                     >
-                      🕯️ {timeLabel(p.timestamp)} {p.pattern}
+                      🕯️ {label}
                     </button>
                   )
                 })}

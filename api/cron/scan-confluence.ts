@@ -13,7 +13,7 @@ import { deriveMilestonePrices } from '../../server/alertOutcomes.js'
 import { getSupportResistanceLevels, getDailyLevels, calculateOpeningRange } from '../../server/supportResistance.js'
 import { detectIVSignal } from '../../server/signalDetection.js'
 import { detectCandlestickPattern } from '../../server/candlestickPatterns.js'
-import { applyConfidenceModifiers } from '../../server/confidenceModifiers.js'
+import { applyConfidenceModifiers, isPrimeTime } from '../../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence } from '../../server/orb.js'
 
 // Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
@@ -31,6 +31,19 @@ const ATR_STOP_MULTIPLIER = 1.5
 // each sized so 3 (this) + 5 (either other job) never exceeds the 8/min cap,
 // even in the worst case where both land in the same minute.
 const CONFLUENCE_INDICES = ['SPY', 'QQQ', 'IWM']
+
+// Twelve Data's free tier also caps TOTAL usage at 800 credits/day, separate from
+// the 8/min cap above - running this every single market-open minute costs up to
+// 390 min x 3 credits = 1,170/day, well over the daily cap on its own (discovered
+// when the daily cap got hit mid-session and silently stopped all snapshot
+// recording for the rest of the day, since a failed Twelve Data call just skips
+// that symbol rather than throwing). Full 1-min cadence is kept ONLY during prime
+// time (the first/last 45 min of the session - the highest-value, most-volume
+// window) and throttled to every 3rd minute otherwise: (90 x 3) + (100 x 3) = 570
+// credits/day, leaving real headroom for scan-day-trades.ts/scan-swings.ts.
+const THROTTLE_INTERVAL_MIN = 3
+
+export const shouldRunThisMinute = (now: Date): boolean => isPrimeTime(now) || now.getMinutes() % THROTTLE_INTERVAL_MIN === 0
 
 // Below this, an alert still gets recorded (and tracked in Performance) but doesn't
 // push a notification - filters out the single weakest tier from each signal family
@@ -59,6 +72,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     if (!isMarketOpen()) {
       return res.status(200).json({ success: true, skipped: true, reason: 'market closed' })
+    }
+
+    if (!shouldRunThisMinute(new Date())) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'throttled (off-cadence minute outside prime time)' })
     }
 
     // One entry per scanned symbol regardless of whether the full signal condition is

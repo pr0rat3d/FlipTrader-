@@ -2,6 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { calculateRSI } from '../../src/lib/technicalIndicators.js'
 import { getDailyCandles } from '../../server/twelvedata.js'
+import { isMarketOpen } from '../../server/marketHours.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
@@ -31,6 +32,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
 
   try {
+    // Daily-interval data only updates once/day (see comment above) - without
+    // this gate, this cron kept spending credits around the clock re-fetching
+    // the same unchanged daily bar every 15 min overnight/weekends, a real
+    // contributor to blowing through the free tier's 800-credit/day cap.
+    if (!isMarketOpen()) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'market closed' })
+    }
+
     const { sectorPool, followedPool, sectorBySymbol } = await getSwingUniverse()
 
     // A symbol that drops out of the universe entirely (its sector gets
