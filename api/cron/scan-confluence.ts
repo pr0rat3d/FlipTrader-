@@ -14,7 +14,7 @@ import { getSupportResistanceLevels, getDailyLevels, calculateOpeningRange } fro
 import { detectIVSignal } from '../../server/signalDetection.js'
 import { detectCandlestickPattern } from '../../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../../server/confidenceModifiers.js'
-import { detectORBBreakout } from '../../server/orb.js'
+import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence } from '../../server/orb.js'
 
 // Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
 // day-trading default, not load-bearing anywhere downstream, easy to tune.
@@ -267,7 +267,97 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, ivFired })
+    // ORB (Opening Range Breakout): standalone continuation strategy, hard-gated
+    // on daily trend alignment - "especially on supertrend days" made concrete as
+    // a requirement to fire, not just a soft confidence modifier. Same suppression
+    // as IV (skipped if full confluence already fired this run for the same move).
+    // IV and ORB are independent of each other - both can fire in the same run,
+    // since they test near-mutually-exclusive conditions (IV wants price NEAR a
+    // level, ORB wants price already CLOSED beyond the opening range).
+    let orbFired: string | null = null
+
+    if (!fullConfluenceFired) {
+      for (const direction of ['bullish', 'bearish'] as const) {
+        const qualifyingSymbols = filterORBCandidates(perSymbolSignals, direction)
+        if (qualifyingSymbols.length < 1) continue
+
+        const candidates = perSymbolSignals.filter(s => qualifyingSymbols.includes(s.symbol))
+        const representative = candidates.find(s => s.symbol === 'SPY') || candidates[0]
+        const dailyLevels = await getDailyLevels(representative.symbol)
+
+        if (!isDailyTrendAligned(direction, dailyLevels?.dailyEma50 ?? null, dailyLevels?.dailyEma200 ?? null)) continue
+
+        const openingRange = calculateOpeningRange(representative.candles)
+        const entryTime = new Date()
+
+        // Trend and ORB-direction are deliberately NOT passed here - trend
+        // alignment is already a hard requirement to reach this point, and
+        // re-applying the ORB modifier to the ORB signal itself would just be
+        // circular multiplication by a constant, not real information.
+        const patternMatch = detectCandlestickPattern(representative.candles)
+        const confidence = applyConfidenceModifiers(orbBaseConfidence(qualifyingSymbols.length), {
+          direction,
+          dailyEma50: null,
+          dailyEma200: null,
+          candlestickDirection: patternMatch?.direction ?? null,
+          orbBreakoutDirection: null,
+          now: entryTime
+        })
+
+        const { data, error } = await supabase
+          .from('day_trade_alerts')
+          .insert({
+            symbol: qualifyingSymbols.join('/'),
+            ttf_status: 'ORB',
+            rsi_divergence: null,
+            macd_curl: direction,
+            indices_triggered: qualifyingSymbols,
+            entry_price: representative.entryPrice,
+            entry_time: entryTime,
+            target_50ema: representative.target50EMA,
+            confidence,
+            orh: openingRange?.orh ?? null,
+            orl: openingRange?.orl ?? null,
+            stop_loss_price: stopLossFor(direction, representative.entryPrice, representative.atr),
+            orb_breakout_direction: direction,
+            timestamp: entryTime
+          })
+          .select()
+
+        if (error) throw error
+
+        if (data && data[0]) {
+          await supabase.from('profit_targets').insert(
+            candidates.map(s => {
+              const milestones = deriveMilestonePrices(s.entryPrice, s.target50EMA)
+              return {
+                day_trade_alert_id: data[0].id,
+                symbol: s.symbol,
+                entry_price: s.entryPrice,
+                entry_time: entryTime,
+                target_50ema_price: s.target50EMA,
+                stop_loss_price: stopLossFor(direction, s.entryPrice, s.atr),
+                milestone_10_price: milestones.milestone10,
+                milestone_20_price: milestones.milestone20,
+                milestone_30_price: milestones.milestone30
+              }
+            })
+          )
+
+          orbFired = direction
+
+          if (confidence >= NOTIFICATION_CONFIDENCE_THRESHOLD) {
+            await sendToTopic(
+              ALERTS_TOPIC,
+              `ORB Alert: ${qualifyingSymbols.join('/')}`,
+              `${direction === 'bullish' ? 'Bullish' : 'Bearish'} breakout continuation beyond the opening range`
+            )
+          }
+        }
+      }
+    }
+
+    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, ivFired, orbFired })
   } catch (error) {
     console.error('Error in scan-confluence:', error)
     res.status(500).json({ error: String(error) })

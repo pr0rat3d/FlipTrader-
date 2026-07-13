@@ -12,7 +12,8 @@ export interface Alert {
   symbol: string;
   // 'IV' is the earlier momentum-only signal (MACD curl + support/resistance
   // confluence, no RSI divergence) - fires before TTF/DTF/STF's full confirmation.
-  ttf_status: 'TTF' | 'DTF' | 'STF' | 'IV';
+  // 'ORB' is opening-range-breakout continuation, hard-gated on daily trend.
+  ttf_status: 'TTF' | 'DTF' | 'STF' | 'IV' | 'ORB';
   rsi_divergence: 'bullish' | 'bearish' | null; // null for IV alerts
   macd_curl: 'bullish' | 'bearish';
   indices_triggered: string[];

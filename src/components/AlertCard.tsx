@@ -14,6 +14,7 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert }) => {
   // rsi_divergence which is null for IV alerts - use it as the direction source.
   const isBullish = alert.macd_curl === 'bullish'
   const isIV = alert.ttf_status === 'IV'
+  const isORB = alert.ttf_status === 'ORB'
 
   // day_trade_alerts.entry_price/target_50ema are a single blended number even for a
   // DTF/TTF alert (2-3 symbols) - blending an ~$600 SPY price with an ~$220 IWM price
@@ -67,12 +68,18 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert }) => {
               <strong>Early Momentum:</strong> {alert.confluence_type}
               {alert.confluence_level != null && ` at $${alert.confluence_level.toFixed(2)}`}
             </>
+          ) : isORB ? (
+            <>
+              <strong>Breakout Continuation:</strong> {alert.orb_breakout_direction} beyond opening range
+            </>
           ) : (
             <>
               <strong>Full Confluence:</strong> RSI {alert.rsi_divergence} + MACD {alert.macd_curl}
             </>
           )}
         </p>
+        {isORB && alert.orh != null && <p className="text-gray-400">OR High: ${alert.orh.toFixed(2)}</p>}
+        {isORB && alert.orl != null && <p className="text-gray-400">OR Low: ${alert.orl.toFixed(2)}</p>}
         {alert.pdh != null && <p className="text-gray-400">PDH: ${alert.pdh.toFixed(2)}</p>}
         {alert.pdl != null && <p className="text-gray-400">PDL: ${alert.pdl.toFixed(2)}</p>}
         {alert.pdc != null && <p className="text-gray-400">PDC: ${alert.pdc.toFixed(2)}</p>}
