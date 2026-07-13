@@ -125,3 +125,16 @@ export interface DailyLevel {
   pdc: number;
   avg_volume_20d: number | null;
 }
+
+export interface ExecutionSettings {
+  id: number;
+  is_enabled: boolean;
+  min_confidence: number;
+  risk_pct: number;
+  min_qty: number;
+  max_qty: number;
+  min_account_equity: number;
+  max_account_equity: number;
+  hard_stop_pct: number;
+  updated_at: string;
+}

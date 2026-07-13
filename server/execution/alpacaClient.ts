@@ -1,0 +1,179 @@
+import axios from 'axios'
+
+// Without this, a hung upstream request waits indefinitely (no client-side
+// cutoff) and can single-handedly blow through a cron's maxDuration - this bit
+// track-profit-targets.ts's Finnhub calls once already, so every Alpaca call
+// here goes through an instance with the same defensive timeout.
+const REQUEST_TIMEOUT_MS = 10_000
+const http = axios.create({ timeout: REQUEST_TIMEOUT_MS })
+
+// Env read lazily inside each function (not at module load) so an unrelated
+// function importing this module can't crash on missing Alpaca env - same
+// reasoning as finnhub.ts's module-level constant, but this module is used
+// from crons where a misconfigured Alpaca key must not break market-hours
+// scanning if it were ever accidentally imported alongside it.
+const tradingHeaders = () => ({
+  'APCA-API-KEY-ID': process.env.ALPACA_API_KEY_ID || '',
+  'APCA-API-SECRET-KEY': process.env.ALPACA_API_SECRET_KEY || ''
+})
+
+const tradingBaseUrl = () => process.env.ALPACA_API_BASE_URL || 'https://paper-api.alpaca.markets'
+// Market data API is a separate host from the trading API regardless of
+// paper/live - see Alpaca's docs (data.alpaca.markets serves both).
+const dataBaseUrl = () => process.env.ALPACA_DATA_BASE_URL || 'https://data.alpaca.markets'
+
+export interface AlpacaAccount {
+  equity: number
+  buying_power: number
+  cash: number
+}
+
+export const getAccount = async (): Promise<AlpacaAccount | null> => {
+  try {
+    const response = await http.get(`${tradingBaseUrl()}/v2/account`, { headers: tradingHeaders() })
+    return {
+      equity: parseFloat(response.data.equity),
+      buying_power: parseFloat(response.data.buying_power),
+      cash: parseFloat(response.data.cash)
+    }
+  } catch (error) {
+    console.error('Error fetching Alpaca account:', error)
+    return null
+  }
+}
+
+export interface AlpacaPosition {
+  symbol: string
+  qty: number
+  side: 'long' | 'short'
+}
+
+export const getPositions = async (): Promise<AlpacaPosition[] | null> => {
+  try {
+    const response = await http.get(`${tradingBaseUrl()}/v2/positions`, { headers: tradingHeaders() })
+    return response.data.map((p: any) => ({ symbol: p.symbol, qty: parseFloat(p.qty), side: p.side }))
+  } catch (error) {
+    console.error('Error fetching Alpaca positions:', error)
+    return null
+  }
+}
+
+export interface AlpacaOrder {
+  id: string
+  client_order_id: string
+  symbol: string
+  status: string
+  side: 'buy' | 'sell'
+  type: string
+  qty: string
+  filled_qty: string
+  filled_avg_price: string | null
+}
+
+export const getOpenOrders = async (symbol: string): Promise<AlpacaOrder[] | null> => {
+  try {
+    const response = await http.get(`${tradingBaseUrl()}/v2/orders`, {
+      headers: tradingHeaders(),
+      params: { status: 'open', symbols: symbol }
+    })
+    return response.data
+  } catch (error) {
+    console.error(`Error fetching open orders for ${symbol}:`, error)
+    return null
+  }
+}
+
+export const getOrder = async (orderId: string): Promise<AlpacaOrder | null> => {
+  try {
+    const response = await http.get(`${tradingBaseUrl()}/v2/orders/${orderId}`, { headers: tradingHeaders() })
+    return response.data
+  } catch (error) {
+    console.error(`Error fetching order ${orderId}:`, error)
+    return null
+  }
+}
+
+export interface PlaceOrderParams {
+  symbol: string
+  qty: number
+  side: 'buy' | 'sell'
+  type: 'market' | 'limit' | 'stop'
+  timeInForce: 'day' | 'gtc'
+  limitPrice?: number
+  stopPrice?: number
+  clientOrderId: string
+}
+
+// Throws on failure - order placement is a critical action the caller must
+// handle explicitly (unlike the read functions above, which degrade to null).
+export const placeOrder = async (params: PlaceOrderParams): Promise<AlpacaOrder> => {
+  const body: Record<string, unknown> = {
+    symbol: params.symbol,
+    qty: params.qty,
+    side: params.side,
+    type: params.type,
+    time_in_force: params.timeInForce,
+    client_order_id: params.clientOrderId
+  }
+  if (params.limitPrice !== undefined) body.limit_price = params.limitPrice.toFixed(2)
+  if (params.stopPrice !== undefined) body.stop_price = params.stopPrice.toFixed(2)
+
+  const response = await http.post(`${tradingBaseUrl()}/v2/orders`, body, { headers: tradingHeaders() })
+  return response.data
+}
+
+export const cancelOrder = async (orderId: string): Promise<boolean> => {
+  try {
+    await http.delete(`${tradingBaseUrl()}/v2/orders/${orderId}`, { headers: tradingHeaders() })
+    return true
+  } catch (error) {
+    console.error(`Error cancelling order ${orderId}:`, error)
+    return false
+  }
+}
+
+export interface ReplaceOrderParams {
+  qty?: number
+  limitPrice?: number
+  stopPrice?: number
+}
+
+// Throws on failure - callers replacing a resting stop need to know explicitly
+// if the replace didn't go through rather than silently continuing as if it did.
+export const replaceOrder = async (orderId: string, params: ReplaceOrderParams): Promise<AlpacaOrder> => {
+  const body: Record<string, unknown> = {}
+  if (params.qty !== undefined) body.qty = params.qty
+  if (params.limitPrice !== undefined) body.limit_price = params.limitPrice.toFixed(2)
+  if (params.stopPrice !== undefined) body.stop_price = params.stopPrice.toFixed(2)
+
+  const response = await http.patch(`${tradingBaseUrl()}/v2/orders/${orderId}`, body, { headers: tradingHeaders() })
+  return response.data
+}
+
+export interface AlpacaBar {
+  t: string // ISO timestamp
+  o: number
+  h: number
+  l: number
+  c: number
+  v: number
+}
+
+export const getBars1Min = async (symbol: string, start: Date, end: Date): Promise<AlpacaBar[] | null> => {
+  try {
+    const response = await http.get(`${dataBaseUrl()}/v2/stocks/${symbol}/bars`, {
+      headers: tradingHeaders(),
+      params: {
+        timeframe: '1Min',
+        start: start.toISOString(),
+        end: end.toISOString(),
+        feed: 'iex',
+        limit: 50
+      }
+    })
+    return response.data?.bars ?? []
+  } catch (error) {
+    console.error(`Error fetching 1-min bars for ${symbol}:`, error)
+    return null
+  }
+}

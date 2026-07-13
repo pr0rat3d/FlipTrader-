@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
-import { getUserPreferences, saveUserPreferences } from '../lib/supabase'
+import { getUserPreferences, saveUserPreferences, getExecutionSettings, setExecutionEnabled } from '../lib/supabase'
 import { Auth } from './Auth'
 
 const SECTORS = ['tech', 'healthcare', 'energy', 'financials', 'consumer', 'industrials', 'materials', 'utilities', 'real_estate', 'communications']
@@ -13,6 +13,9 @@ export const Settings: React.FC = () => {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [executionEnabled, setExecutionEnabledState] = useState(false)
+  const [executionToggling, setExecutionToggling] = useState(false)
+  const [executionError, setExecutionError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!user) {
@@ -35,7 +38,26 @@ export const Settings: React.FC = () => {
     }
 
     loadPreferences()
+
+    getExecutionSettings()
+      .then(settings => setExecutionEnabledState(settings.is_enabled))
+      .catch(error => console.error('Error loading execution settings:', error))
   }, [user])
+
+  const handleToggleExecution = async () => {
+    const next = !executionEnabled
+    setExecutionToggling(true)
+    setExecutionError(null)
+    try {
+      await setExecutionEnabled(next)
+      setExecutionEnabledState(next)
+    } catch (error) {
+      console.error('Error updating execution settings:', error)
+      setExecutionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setExecutionToggling(false)
+    }
+  }
 
   const toggleSector = (sector: string) => {
     setSelectedSectors(prev =>
@@ -94,6 +116,26 @@ export const Settings: React.FC = () => {
 
       {!loading && (
         <>
+          <div className="mb-6">
+            <h3 className="text-lg font-bold text-white mb-3">Automated Paper Trading</h3>
+            <p className="text-xs text-gray-400 mb-3">
+              When enabled, new qualifying signals are automatically entered on Alpaca paper trading.
+              Turning this off only stops NEW entries - positions already open keep being monitored
+              and protected.
+            </p>
+            <label className="flex items-center text-white cursor-pointer">
+              <input
+                type="checkbox"
+                checked={executionEnabled}
+                disabled={executionToggling}
+                onChange={handleToggleExecution}
+                className="mr-2"
+              />
+              {executionEnabled ? 'Enabled' : 'Disabled'}
+            </label>
+            {executionError && <p className="text-sm text-red-400 mt-2">Failed to update: {executionError}</p>}
+          </div>
+
           <div className="mb-6">
             <h3 className="text-lg font-bold text-white mb-3">Notification Type</h3>
             <div className="space-y-2">

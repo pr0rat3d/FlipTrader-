@@ -180,6 +180,26 @@ export const getRecentSwingSnapshots = async (symbols: string[], limit = 500) =>
   return data
 }
 
+export const getExecutionSettings = async () => {
+  const { data, error } = await supabase
+    .from('execution_settings')
+    .select('*')
+    .eq('id', 1)
+    .single()
+
+  if (error) throw error
+  return data
+}
+
+export const setExecutionEnabled = async (isEnabled: boolean) => {
+  const { error } = await supabase
+    .from('execution_settings')
+    .update({ is_enabled: isEnabled, updated_at: new Date().toISOString() })
+    .eq('id', 1)
+
+  if (error) throw error
+}
+
 export const getDailyLevelsForSymbols = async (symbols: string[]) => {
   if (symbols.length === 0) return []
   // trading_date is stored in NY calendar-day terms (server's nyDateKey) - must

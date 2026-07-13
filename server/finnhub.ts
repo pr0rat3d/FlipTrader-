@@ -3,10 +3,16 @@ import axios from 'axios'
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY
 const BASE_URL = 'https://finnhub.io/api/v1'
 
+// Without this, a hung upstream request waits indefinitely (no client-side
+// cutoff) and can single-handedly blow through a cron's maxDuration even with
+// just one call in the loop - this is what caused a track-profit-targets timeout.
+const REQUEST_TIMEOUT_MS = 10_000
+
 export const getQuote = async (symbol: string) => {
   try {
     const response = await axios.get(`${BASE_URL}/quote`, {
-      params: { symbol, token: FINNHUB_API_KEY }
+      params: { symbol, token: FINNHUB_API_KEY },
+      timeout: REQUEST_TIMEOUT_MS
     })
     return response.data
   } catch (error) {
@@ -32,7 +38,8 @@ const titleCase = (s: string): string =>
 export const searchSymbols = async (query: string): Promise<SymbolMatch[]> => {
   try {
     const response = await axios.get(`${BASE_URL}/search`, {
-      params: { q: query, token: FINNHUB_API_KEY }
+      params: { q: query, token: FINNHUB_API_KEY },
+      timeout: REQUEST_TIMEOUT_MS
     })
 
     const results = response.data?.result
