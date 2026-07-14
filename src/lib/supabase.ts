@@ -41,6 +41,22 @@ export const getAlerts = async () => {
   return data
 }
 
+// Dashboard-only: scoped to today so the active-alerts view doesn't accumulate
+// every alert ever fired - anything older belongs on the History page (still
+// getAlerts()'s full unscoped list) or Performance, not cluttering "what's
+// live right now."
+export const getTodayAlerts = async () => {
+  const { data, error } = await supabase
+    .from('day_trade_alerts')
+    .select('*')
+    .gte('timestamp', startOfTodayNY())
+    .order('created_at', { ascending: false })
+    .limit(50)
+
+  if (error) throw error
+  return data
+}
+
 export const getSwingAlerts = async () => {
   const { data, error } = await supabase
     .from('swing_trade_alerts')

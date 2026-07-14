@@ -2,10 +2,13 @@ import React, { useEffect, useState } from 'react'
 import { Alert, ProfitTarget } from '../types'
 import { getTierColor, getTierLabel } from '../lib/alerts'
 import { getProfitTargetsForAlert } from '../lib/supabase'
+import { suggestOptionStrike } from '../lib/optionSuggestion'
 
 interface AlertCardProps {
   alert: Alert
   livePrices?: Record<string, number | null>
+  occurrenceCount?: number
+  firstSeenAt?: string
 }
 
 const MILESTONE_COLOR_HIT = '#4ade80'
@@ -61,7 +64,7 @@ const MilestoneLadder: React.FC<{ leg: ProfitTarget }> = ({ leg }) => {
   )
 }
 
-export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices }) => {
+export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices, occurrenceCount, firstSeenAt }) => {
   const tierColor = getTierColor(alert.ttf_status)
   const tierLabel = getTierLabel(alert.ttf_status)
   // macd_curl is always populated (both signal types require it), unlike
@@ -90,6 +93,11 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices }) => {
         <div>
           <h3 className="text-lg font-bold text-white">{alert.symbol}</h3>
           <p className="text-sm text-gray-400">{new Date(alert.timestamp).toLocaleTimeString()}</p>
+          {occurrenceCount != null && occurrenceCount > 1 && firstSeenAt && (
+            <p className="text-xs text-gray-500">
+              Continuation - {occurrenceCount}x since {new Date(firstSeenAt).toLocaleTimeString()}
+            </p>
+          )}
         </div>
         <span className="px-3 py-1 rounded-full text-white text-sm font-bold" style={{ backgroundColor: tierColor }}>
           {alert.ttf_status} - {tierLabel}
@@ -185,6 +193,16 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices }) => {
                   })()}
                 </div>
                 <MilestoneLadder leg={leg} />
+                {(() => {
+                  const opt = suggestOptionStrike(isBullish ? 'bullish' : 'bearish', leg.entry_price, leg.target_50ema_price)
+                  return (
+                    <p className="text-xs text-gray-500 mt-1">
+                      Options (computed, not a live quote): <span className="text-white font-bold">{leg.symbol} {opt.entryStrike}{opt.contractType}</span>
+                      {' '}· target ~{opt.targetStrike}
+                      {leg.stop_loss_price != null && ` · invalidate ${isBullish ? 'below' : 'above'} $${leg.stop_loss_price.toFixed(2)}`}
+                    </p>
+                  )
+                })()}
               </div>
             )
           })}
