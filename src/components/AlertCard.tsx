@@ -219,7 +219,18 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices, occurre
                   // already past the level the reversal is actually pivoting
                   // on. ORB/TTF/DTF/STF keep using entry_price - "straightforward,
                   // nearest strike to where price actually is."
-                  const strikeBasisPrice = isIV && alert.confluence_level != null ? alert.confluence_level : leg.entry_price
+                  //
+                  // confluence_level is computed from ONE representative symbol
+                  // (SPY when triggered, else the first triggered symbol - see
+                  // scan-confluence.ts) and stored once per alert, not per leg -
+                  // applying a SPY-scale level to a QQQ/IWM leg would suggest a
+                  // nonsense strike (e.g. "753 P" on a stock trading at $720).
+                  // Only the representative leg gets the confluence-level basis;
+                  // every other leg in the same multi-symbol alert falls back to
+                  // its own entry_price, same as ORB/TTF/DTF/STF.
+                  const representativeSymbol = alert.indices_triggered.includes('SPY') ? 'SPY' : alert.indices_triggered[0]
+                  const isRepresentativeLeg = leg.symbol === representativeSymbol
+                  const strikeBasisPrice = isIV && isRepresentativeLeg && alert.confluence_level != null ? alert.confluence_level : leg.entry_price
                   const opt = suggestOptionStrike(isBullish ? 'bullish' : 'bearish', strikeBasisPrice, leg.target_50ema_price)
                   return (
                     <p className="text-xs text-gray-500 mt-1">
