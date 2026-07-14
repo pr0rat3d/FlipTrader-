@@ -5,9 +5,63 @@ import { getProfitTargetsForAlert } from '../lib/supabase'
 
 interface AlertCardProps {
   alert: Alert
+  livePrices?: Record<string, number | null>
 }
 
-export const AlertCard: React.FC<AlertCardProps> = ({ alert }) => {
+const MILESTONE_COLOR_HIT = '#4ade80'
+const MILESTONE_COLOR_NEXT = '#facc15'
+const MILESTONE_COLOR_PENDING = '#6b7280'
+
+// Scale-out ladder for one leg: 10/20/30% of the entry->target distance, plus
+// the full target itself. `milestone_X_hit_at`/`target_hit_at` are set by the
+// live per-minute tracker (track-profit-targets.ts) the moment price actually
+// crosses each level, so "hit" here reflects the real trade, not a live
+// recompute against current price - the two agree except for that tracker's
+// own ~18s-worst-case lag. The first not-yet-hit step is called out as
+// "next" so it reads as an answer to "what's coming up," not just a static
+// list of five numbers.
+const MilestoneLadder: React.FC<{ leg: ProfitTarget }> = ({ leg }) => {
+  const steps = [
+    { label: '10%', price: leg.milestone_10_price, hitAt: leg.milestone_10_hit_at },
+    { label: '20%', price: leg.milestone_20_price, hitAt: leg.milestone_20_hit_at },
+    { label: '30%', price: leg.milestone_30_price, hitAt: leg.milestone_30_hit_at },
+    { label: 'Target', price: leg.target_50ema_price, hitAt: leg.target_hit_at ?? null }
+  ].filter((step): step is { label: string; price: number; hitAt: string | null } => step.price != null)
+
+  const nextIndex = steps.findIndex(step => !step.hitAt)
+
+  return (
+    <div className="flex mt-1" style={{ gap: 4 }}>
+      {steps.map((step, i) => {
+        const hit = !!step.hitAt
+        const isNext = i === nextIndex
+        const color = hit ? MILESTONE_COLOR_HIT : isNext ? MILESTONE_COLOR_NEXT : MILESTONE_COLOR_PENDING
+        const isLast = i === steps.length - 1
+        return (
+          <div
+            key={step.label}
+            className="flex-1 text-center rounded"
+            style={{ padding: '3px 2px', background: hit ? 'rgba(74,222,128,0.15)' : isNext ? 'rgba(250,204,21,0.12)' : '#1f2937', border: `1px solid ${color}` }}
+            title={
+              hit
+                ? `Hit at ${new Date(step.hitAt!).toLocaleTimeString()} - take your scheduled slice here`
+                : isNext
+                  ? 'Next level up - the one to watch right now'
+                  : 'Not yet reached'
+            }
+          >
+            <div style={{ fontSize: 9, fontWeight: 'bold', color }}>
+              {hit ? '✓ ' : ''}{step.label}{isLast && ' (runner)'}
+            </div>
+            <div className="text-xs font-bold text-white">${step.price.toFixed(2)}</div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices }) => {
   const tierColor = getTierColor(alert.ttf_status)
   const tierLabel = getTierLabel(alert.ttf_status)
   // macd_curl is always populated (both signal types require it), unlike
@@ -99,6 +153,11 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert }) => {
         <div className="space-y-2">
           {legs.map(leg => {
             const priceChange = ((leg.target_50ema_price - leg.entry_price) / leg.entry_price * 100).toFixed(2)
+            // Falls back to the frozen entry price until the live feed has a
+            // value for this symbol, so R:R shows the original at-signal-time
+            // number rather than a blank/"—" flash on first render.
+            const livePrice = livePrices?.[leg.symbol]
+            const currentPrice = livePrice ?? leg.entry_price
             return (
               <div key={leg.id} className="p-2 bg-gray-700 rounded">
                 <div className="flex justify-between items-center">
@@ -109,21 +168,27 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert }) => {
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-xs mt-1">
                   <span className="text-gray-400">Entry <span className="text-white font-bold">${leg.entry_price.toFixed(2)}</span></span>
+                  <span className="text-gray-400">
+                    Current <span className="text-white font-bold">${currentPrice.toFixed(2)}</span>
+                    {livePrice != null && <span className="text-green-400" title="Live price">  ●</span>}
+                  </span>
                   <span className="text-gray-400">Target <span className="text-white font-bold">${leg.target_50ema_price.toFixed(2)}</span></span>
                   {leg.stop_loss_price != null && (
                     <span className="text-gray-400">Stop <span className="text-red-400 font-bold">${leg.stop_loss_price.toFixed(2)}</span></span>
                   )}
                   {leg.stop_loss_price != null && (() => {
-                    const risk = Math.abs(leg.entry_price - leg.stop_loss_price)
-                    const reward = Math.abs(leg.target_50ema_price - leg.entry_price)
+                    const risk = Math.abs(currentPrice - leg.stop_loss_price)
+                    const reward = Math.abs(leg.target_50ema_price - currentPrice)
                     return risk > 0 ? (
                       <span className="text-gray-400">R:R <span className="text-white font-bold">1:{(reward / risk).toFixed(1)}</span></span>
                     ) : null
                   })()}
                 </div>
+                <MilestoneLadder leg={leg} />
               </div>
             )
           })}
+          <p className="text-xs text-gray-500">Scale out a slice at each level as it's hit; hold the rest past Target as a runner.</p>
         </div>
       ) : (
         <p className="text-xs text-gray-400">Indices: {alert.indices_triggered.join('/')}</p>

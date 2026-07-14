@@ -14,7 +14,7 @@ import { getSupportResistanceLevels, getDailyLevels, calculateOpeningRange } fro
 import { detectIVSignal } from '../../server/signalDetection.js'
 import { detectCandlestickPattern } from '../../server/candlestickPatterns.js'
 import { applyConfidenceModifiers, isPrimeTime } from '../../server/confidenceModifiers.js'
-import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence } from '../../server/orb.js'
+import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, orbTargetPrice } from '../../server/orb.js'
 
 // Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
 // day-trading default, not load-bearing anywhere downstream, easy to tune.
@@ -329,6 +329,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           now: entryTime
         })
 
+        const representativeStop = stopLossFor(direction, representative.entryPrice, representative.atr)
+
         const { data, error } = await supabase
           .from('day_trade_alerts')
           .insert({
@@ -339,11 +341,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             indices_triggered: qualifyingSymbols,
             entry_price: representative.entryPrice,
             entry_time: entryTime,
-            target_50ema: representative.target50EMA,
+            target_50ema: orbTargetPrice(direction, representative.entryPrice, representativeStop),
             confidence,
             orh: openingRange?.orh ?? null,
             orl: openingRange?.orl ?? null,
-            stop_loss_price: stopLossFor(direction, representative.entryPrice, representative.atr),
+            stop_loss_price: representativeStop,
             orb_breakout_direction: direction,
             timestamp: entryTime
           })
@@ -354,14 +356,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (data && data[0]) {
           await supabase.from('profit_targets').insert(
             candidates.map(s => {
-              const milestones = deriveMilestonePrices(s.entryPrice, s.target50EMA)
+              const legStop = stopLossFor(direction, s.entryPrice, s.atr)
+              const legTarget = orbTargetPrice(direction, s.entryPrice, legStop)
+              const milestones = deriveMilestonePrices(s.entryPrice, legTarget)
               return {
                 day_trade_alert_id: data[0].id,
                 symbol: s.symbol,
                 entry_price: s.entryPrice,
                 entry_time: entryTime,
-                target_50ema_price: s.target50EMA,
-                stop_loss_price: stopLossFor(direction, s.entryPrice, s.atr),
+                target_50ema_price: legTarget,
+                stop_loss_price: legStop,
                 milestone_10_price: milestones.milestone10,
                 milestone_20_price: milestones.milestone20,
                 milestone_30_price: milestones.milestone30

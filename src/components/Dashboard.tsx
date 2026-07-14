@@ -1,13 +1,17 @@
 import React, { useMemo, useState } from 'react'
 import { useAlerts } from '../hooks/useAlerts'
 import { useSwingAlerts } from '../hooks/useSwingAlerts'
+import { useLivePrices } from '../hooks/useLivePrices'
 import { AlertCard } from './AlertCard'
 import { SwingAlertCard } from './SwingAlertCard'
+
+const DAY_TRADE_INDICES = ['SPY', 'QQQ', 'IWM']
 
 export const Dashboard: React.FC = () => {
   const { alerts, loading } = useAlerts()
   const { alerts: swingAlerts, loading: swingLoading } = useSwingAlerts()
   const [sortBy, setSortBy] = useState<'recent' | 'confidence'>('recent')
+  const livePrices = useLivePrices(DAY_TRADE_INDICES)
 
   const sortedAlerts = useMemo(() => {
     if (sortBy === 'recent') return alerts
@@ -46,7 +50,7 @@ export const Dashboard: React.FC = () => {
 
       <div className="space-y-2 mb-6">
         {sortedAlerts.map(alert => (
-          <AlertCard key={alert.id} alert={alert} />
+          <AlertCard key={alert.id} alert={alert} livePrices={livePrices} />
         ))}
       </div>
 

@@ -64,3 +64,31 @@ export const orbBaseConfidence = (qualifyingCount: number): number => {
   if (qualifyingCount === 2) return 0.65
   return 0.55
 }
+
+// ORB is a continuation strategy - it needs a target further along in the
+// breakout direction, NOT the 50 EMA reversion target TTF/DTF/STF/IV use.
+// The 50 EMA is a lagging average that's frequently BEHIND price on exactly
+// the trend days ORB is designed to fire on ("especially on supertrend
+// days") - price has already run beyond it before the breakout even
+// happens. Using it here silently produced a "target" behind entry for a
+// live-fired alert (SPY, 2026-07-14: entry $751.61, 50EMA $751.00 - a
+// bullish trade "targeting" a lower price), which fed backwards 10/20/30%
+// milestones into the execution bot's scale-out limit orders - a sell limit
+// below entry on a long fills almost immediately, dumping the position
+// right after entry instead of scaling out on strength. A fixed R-multiple
+// of the same ATR-based stop distance is used instead: symmetric with the
+// R:R already shown in the UI, and guaranteed to land on the correct side
+// of entry by construction.
+const ORB_TARGET_R_MULTIPLE = 2
+
+export const orbTargetPrice = (
+  direction: 'bullish' | 'bearish',
+  entryPrice: number,
+  stopLossPrice: number | null
+): number => {
+  if (stopLossPrice === null) return entryPrice
+  const riskPerShare = Math.abs(entryPrice - stopLossPrice)
+  return direction === 'bullish'
+    ? entryPrice + ORB_TARGET_R_MULTIPLE * riskPerShare
+    : entryPrice - ORB_TARGET_R_MULTIPLE * riskPerShare
+}

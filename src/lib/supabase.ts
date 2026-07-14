@@ -134,6 +134,20 @@ export const getTodayIndicatorSnapshots = async (symbol: string, category: 'day_
   return data || []
 }
 
+export const getLatestPrice = async (symbol: string, category: 'day_trade' | 'swing'): Promise<number | null> => {
+  const { data, error } = await supabase
+    .from('indicator_snapshots')
+    .select('close_price')
+    .eq('symbol', symbol)
+    .eq('category', category)
+    .order('timestamp', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) throw error
+  return data?.close_price ?? null
+}
+
 export const subscribeToIndicatorSnapshots = (symbol: string, callback: (row: any) => void) => {
   return supabase
     .channel(`indicator_snapshots:${symbol}`)
