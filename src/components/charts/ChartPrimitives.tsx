@@ -8,11 +8,16 @@ export const COLOR_BULLISH = '#4ade80'
 export const COLOR_BEARISH = '#f87171'
 export const COLOR_MUTED = '#898781'
 export const COLOR_GRID = '#374151'
+// Bright, high-contrast against both candle colors and the dark background - the
+// old thin gray dashed crosshair alone was hard to spot on a small mobile screen
+// where the whole 600-wide viewBox gets scaled down to a few hundred CSS pixels.
+export const COLOR_HIGHLIGHT = '#facc15'
 
 export const CHART_WIDTH = 600
 export const CHART_HEIGHT = 90
 export const AXIS_HEIGHT = 16
 export const PAD = 8
+export const HIGHLIGHT_BAND_WIDTH = 16
 
 export const xScale = (i: number, n: number) =>
   n <= 1 ? CHART_WIDTH / 2 : (i / (n - 1)) * (CHART_WIDTH - PAD * 2) + PAD
@@ -172,6 +177,20 @@ export const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hovered
           onPointerMove={handleMove}
           onPointerLeave={() => onHover(null)}
         />
+        {/* Tinted band behind the series, sized well beyond a single hairline so the
+            selected bar is obvious at a glance on a small mobile screen, not just
+            findable by hunting for a 1px dashed line. */}
+        {hoveredIndex !== null && n > 0 && (
+          <rect
+            x={xScale(hoveredIndex, n) - HIGHLIGHT_BAND_WIDTH / 2}
+            y={0}
+            width={HIGHLIGHT_BAND_WIDTH}
+            height={CHART_HEIGHT}
+            fill={COLOR_HIGHLIGHT}
+            opacity={0.16}
+            pointerEvents="none"
+          />
+        )}
         {children}
         {hoveredIndex !== null && n > 0 && (
           <line
@@ -179,10 +198,11 @@ export const ChartFrame: React.FC<ChartFrameProps> = ({ title, subtitle, hovered
             x2={xScale(hoveredIndex, n)}
             y1={0}
             y2={CHART_HEIGHT}
-            stroke={COLOR_MUTED}
-            strokeWidth={1}
-            strokeDasharray="3,3"
-            opacity={0.7}
+            stroke={COLOR_HIGHLIGHT}
+            strokeWidth={1.75}
+            strokeDasharray="4,3"
+            opacity={0.95}
+            pointerEvents="none"
           />
         )}
         <line x1={PAD} x2={CHART_WIDTH - PAD} y1={CHART_HEIGHT} y2={CHART_HEIGHT} stroke={COLOR_GRID} strokeWidth={1} />
@@ -218,7 +238,13 @@ const CANDLE_BODY_RADIUS = 2
 const CANDLE_MIN_BODY_HEIGHT = 1.5
 const CANDLE_BODY_OUTLINE = '#1f2937'
 
-export const CandlestickSeries: React.FC<{ bars: Array<OHLCBar | null>; y: (v: number) => number }> = ({ bars, y }) => {
+// `highlightIndex` bolds the one candle a user selected (via the pattern timeline
+// or hover) with a bright ring around the whole bar - the shared crosshair line in
+// ChartFrame marks the x-position across all three stacked charts, but on a candle
+// chart specifically the actual bar is the thing being pointed at, so it gets its
+// own unmistakable treatment rather than relying on the thin line alone (which was
+// the part that was hard to spot on mobile).
+export const CandlestickSeries: React.FC<{ bars: Array<OHLCBar | null>; y: (v: number) => number; highlightIndex?: number | null }> = ({ bars, y, highlightIndex = null }) => {
   const n = bars.length
   const barWidth = n > 1 ? Math.min(14, ((CHART_WIDTH - PAD * 2) / n) * 0.6) : 10
 
@@ -230,24 +256,38 @@ export const CandlestickSeries: React.FC<{ bars: Array<OHLCBar | null>; y: (v: n
         const color = bar.close >= bar.open ? COLOR_BULLISH : COLOR_BEARISH
         const bodyTop = y(Math.max(bar.open, bar.close))
         const bodyBottom = y(Math.min(bar.open, bar.close))
+        const bodyHeight = Math.max(bodyBottom - bodyTop, CANDLE_MIN_BODY_HEIGHT)
+        const isHighlighted = i === highlightIndex
         return (
           <g key={i}>
+            {isHighlighted && (
+              <rect
+                x={x - barWidth / 2 - 3}
+                y={y(bar.high) - 3}
+                width={barWidth + 6}
+                height={y(bar.low) - y(bar.high) + 6}
+                rx={CANDLE_BODY_RADIUS + 2}
+                fill="none"
+                stroke={COLOR_HIGHLIGHT}
+                strokeWidth={2}
+              />
+            )}
             <line
               x1={x} x2={x}
               y1={y(bar.high)} y2={y(bar.low)}
               stroke={color}
-              strokeWidth={1.25}
+              strokeWidth={isHighlighted ? 2 : 1.25}
               strokeLinecap="round"
             />
             <rect
               x={x - barWidth / 2}
               y={bodyTop}
               width={barWidth}
-              height={Math.max(bodyBottom - bodyTop, CANDLE_MIN_BODY_HEIGHT)}
+              height={bodyHeight}
               rx={CANDLE_BODY_RADIUS}
               fill={color}
-              stroke={CANDLE_BODY_OUTLINE}
-              strokeWidth={0.75}
+              stroke={isHighlighted ? COLOR_HIGHLIGHT : CANDLE_BODY_OUTLINE}
+              strokeWidth={isHighlighted ? 1.5 : 0.75}
             />
           </g>
         )

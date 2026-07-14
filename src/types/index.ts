@@ -98,6 +98,7 @@ export interface IndicatorSnapshot {
   macd_line: number | null;
   macd_signal: number | null;
   macd_histogram: number | null;
+  ema_9: number | null;
   ema_50: number | null;
   ema_200: number | null;
   vwap: number | null;

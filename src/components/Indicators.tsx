@@ -4,7 +4,7 @@ import { useAuth } from '../hooks/useAuth'
 import { getActiveUniverse, getWatchlist } from '../lib/supabase'
 import { IndicatorSnapshot } from '../types'
 import {
-  CHART_WIDTH, CHART_HEIGHT, PAD, COLOR_BULLISH, COLOR_BEARISH, COLOR_MUTED, COLOR_GRID,
+  CHART_WIDTH, CHART_HEIGHT, PAD, COLOR_BULLISH, COLOR_BEARISH, COLOR_MUTED, COLOR_GRID, COLOR_HIGHLIGHT,
   xScale, buildYScale, buildXLabels, timeLabel, fmt, linePath, toHeikinAshi,
   TooltipRow, ChartFrame, LegendItem, CandlestickSeries, OHLCBar
 } from './charts/ChartPrimitives'
@@ -12,9 +12,30 @@ import {
 // Still used for the RSI line and the current-price badge, both independent of the
 // candlestick colors above.
 const COLOR_CLOSE = '#4ade80'
+const COLOR_EMA9 = '#f472b6'
 const COLOR_EMA50 = '#3987e5'
 const COLOR_EMA200 = '#c98500'
 const COLOR_VWAP = '#9085e9'
+
+interface LineVisibility {
+  ema9: boolean
+  ema50: boolean
+  ema200: boolean
+  vwap: boolean
+}
+
+const DEFAULT_LINE_VISIBILITY: LineVisibility = { ema9: true, ema50: true, ema200: true, vwap: true }
+const LINE_VISIBILITY_STORAGE_KEY = 'fliptrader:indicator-line-visibility'
+
+const loadLineVisibility = (): LineVisibility => {
+  try {
+    const raw = localStorage.getItem(LINE_VISIBILITY_STORAGE_KEY)
+    if (!raw) return DEFAULT_LINE_VISIBILITY
+    return { ...DEFAULT_LINE_VISIBILITY, ...JSON.parse(raw) }
+  } catch {
+    return DEFAULT_LINE_VISIBILITY
+  }
+}
 
 interface ChartsProps {
   snapshots: IndicatorSnapshot[]
@@ -25,14 +46,20 @@ interface ChartsProps {
 // meaningful. Swing is deduped to one bar per trading day (see snapshot.ts) - a
 // single daily candle per day doesn't benefit from HA smoothing the way a run of
 // 5-min bars does, so swing reverts to a plain close-price trend line instead.
-const PriceChart: React.FC<ChartsProps & { category: 'day_trade' | 'swing'; hoveredIndex: number | null; onHover: (i: number | null) => void }> = ({ snapshots, xLabels, category, hoveredIndex, onHover }) => {
+const PriceChart: React.FC<ChartsProps & { category: 'day_trade' | 'swing'; hoveredIndex: number | null; onHover: (i: number | null) => void; visibility: LineVisibility }> = ({ snapshots, xLabels, category, hoveredIndex, onHover, visibility }) => {
   const n = snapshots.length
   const closes = snapshots.map(s => s.close_price)
+  const ema9s = snapshots.map(s => s.ema_9 ?? NaN)
   const ema50s = snapshots.map(s => s.ema_50 ?? NaN)
   const ema200s = snapshots.map(s => s.ema_200 ?? NaN)
   const vwaps = snapshots.map(s => s.vwap ?? NaN)
   const hasVwap = vwaps.some(Number.isFinite)
   const isDayTrade = category === 'day_trade'
+
+  const showEma9 = visibility.ema9
+  const showEma50 = visibility.ema50
+  const showEma200 = visibility.ema200
+  const showVwap = visibility.vwap && hasVwap
 
   // A snapshot recorded before OHLC capture existed (open_price/high_price/low_price
   // were added later) has no candle - null keeps it index-aligned with everything
@@ -45,7 +72,16 @@ const PriceChart: React.FC<ChartsProps & { category: 'day_trade' | 'swing'; hove
   const haBars = useMemo(() => (isDayTrade ? toHeikinAshi(rawBars) : []), [snapshots, isDayTrade])
   const haHighLows = haBars.flatMap(b => (b ? [b.high, b.low] : []))
 
-  const y = buildYScale([...(isDayTrade ? haHighLows : closes), ...ema50s, ...ema200s, ...(hasVwap ? vwaps : [])].filter(Number.isFinite))
+  // Hidden lines are excluded from the y-scale, not just un-rendered - otherwise
+  // toggling off e.g. EMA200 while it's sitting well outside the candle range
+  // would leave the chart scaled to accommodate a line that's no longer drawn.
+  const y = buildYScale([
+    ...(isDayTrade ? haHighLows : closes),
+    ...(showEma9 ? ema9s : []),
+    ...(showEma50 ? ema50s : []),
+    ...(showEma200 ? ema200s : []),
+    ...(showVwap ? vwaps : [])
+  ].filter(Number.isFinite))
 
   const toPoints = (vals: number[]) => vals.map((v, i) => (Number.isFinite(v) ? { x: xScale(i, n), y: y(v) } : null))
 
@@ -64,15 +100,14 @@ const PriceChart: React.FC<ChartsProps & { category: 'day_trade' | 'swing'; hove
               { label: 'C', value: `$${fmt(hoveredHA.close)}`, color: haColor }
             ]
           : [{ label: 'Close', value: `$${fmt(hovered.close_price)}`, color: COLOR_CLOSE }]),
-        { label: 'EMA50', value: `$${fmt(hovered.ema_50)}`, color: COLOR_EMA50 },
-        { label: 'EMA200', value: `$${fmt(hovered.ema_200)}`, color: COLOR_EMA200 },
-        ...(hasVwap ? [{ label: 'VWAP', value: `$${fmt(hovered.vwap)}`, color: COLOR_VWAP }] : [])
+        ...(showEma9 ? [{ label: 'EMA9', value: `$${fmt(hovered.ema_9)}`, color: COLOR_EMA9 }] : []),
+        ...(showEma50 ? [{ label: 'EMA50', value: `$${fmt(hovered.ema_50)}`, color: COLOR_EMA50 }] : []),
+        ...(showEma200 ? [{ label: 'EMA200', value: `$${fmt(hovered.ema_200)}`, color: COLOR_EMA200 }] : []),
+        ...(showVwap ? [{ label: 'VWAP', value: `$${fmt(hovered.vwap)}`, color: COLOR_VWAP }] : [])
       ]
     : []
 
-  const title = isDayTrade
-    ? (hasVwap ? 'Heikin-Ashi vs EMA50 / EMA200 / VWAP' : 'Heikin-Ashi vs EMA50 / EMA200')
-    : 'Price vs EMA50 / EMA200'
+  const title = isDayTrade ? 'Heikin-Ashi' : 'Price'
 
   return (
     <ChartFrame
@@ -87,9 +122,10 @@ const PriceChart: React.FC<ChartsProps & { category: 'day_trade' | 'swing'; hove
           {isDayTrade
             ? <LegendItem color={haColor} label="HA Close" value={`$${fmt(hoveredHA?.close)}`} />
             : <LegendItem color={COLOR_CLOSE} label="Close" value={`$${fmt(hovered?.close_price)}`} />}
-          <LegendItem color={COLOR_EMA50} label="EMA50" value={`$${fmt(hovered?.ema_50)}`} />
-          <LegendItem color={COLOR_EMA200} label="EMA200" value={`$${fmt(hovered?.ema_200)}`} />
-          {hasVwap && <LegendItem color={COLOR_VWAP} label="VWAP" value={`$${fmt(hovered?.vwap)}`} />}
+          {showEma9 && <LegendItem color={COLOR_EMA9} label="EMA9" value={`$${fmt(hovered?.ema_9)}`} />}
+          {showEma50 && <LegendItem color={COLOR_EMA50} label="EMA50" value={`$${fmt(hovered?.ema_50)}`} />}
+          {showEma200 && <LegendItem color={COLOR_EMA200} label="EMA200" value={`$${fmt(hovered?.ema_200)}`} />}
+          {showVwap && <LegendItem color={COLOR_VWAP} label="VWAP" value={`$${fmt(hovered?.vwap)}`} />}
         </div>
       }
     >
@@ -97,18 +133,22 @@ const PriceChart: React.FC<ChartsProps & { category: 'day_trade' | 'swing'; hove
       <text x={PAD} y={CHART_HEIGHT - PAD - 2} textAnchor="start" fontSize={9} fill={COLOR_MUTED}>${fmt(y.min)}</text>
       {/* Slightly thinner and softened vs. the candles/price line below - EMAs/VWAP
           are supporting context, not the primary visual focus of the chart. */}
-      <path d={linePath(toPoints(ema200s))} fill="none" stroke={COLOR_EMA200} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />
-      <path d={linePath(toPoints(ema50s))} fill="none" stroke={COLOR_EMA50} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />
-      {hasVwap && (
+      {showEma200 && <path d={linePath(toPoints(ema200s))} fill="none" stroke={COLOR_EMA200} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />}
+      {showEma50 && <path d={linePath(toPoints(ema50s))} fill="none" stroke={COLOR_EMA50} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />}
+      {showEma9 && <path d={linePath(toPoints(ema9s))} fill="none" stroke={COLOR_EMA9} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />}
+      {showVwap && (
         <path d={linePath(toPoints(vwaps))} fill="none" stroke={COLOR_VWAP} strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round" opacity={0.85} />
       )}
       {isDayTrade ? (
-        <CandlestickSeries bars={haBars} y={y} />
+        <CandlestickSeries bars={haBars} y={y} highlightIndex={hoveredIndex} />
       ) : (
         <>
           <path d={linePath(toPoints(closes))} fill="none" stroke={COLOR_CLOSE} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
           {n > 0 && Number.isFinite(closes[n - 1]) && (
             <circle cx={xScale(n - 1, n)} cy={y(closes[n - 1])} r={4} fill={COLOR_CLOSE} stroke="#1f2937" strokeWidth={2} />
+          )}
+          {hoveredIndex !== null && Number.isFinite(closes[hoveredIndex]) && (
+            <circle cx={xScale(hoveredIndex, n)} cy={y(closes[hoveredIndex])} r={6} fill="none" stroke={COLOR_HIGHLIGHT} strokeWidth={2} />
           )}
         </>
       )}
@@ -229,6 +269,15 @@ export const Indicators: React.FC = () => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
   const [showTable, setShowTable] = useState(false)
   const [symbolsLoading, setSymbolsLoading] = useState(true)
+  const [lineVisibility, setLineVisibility] = useState<LineVisibility>(loadLineVisibility)
+
+  const toggleLine = (key: keyof LineVisibility) => {
+    setLineVisibility(prev => {
+      const next = { ...prev, [key]: !prev[key] }
+      localStorage.setItem(LINE_VISIBILITY_STORAGE_KEY, JSON.stringify(next))
+      return next
+    })
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -413,7 +462,33 @@ export const Indicators: React.FC = () => {
               )
             })()
           )}
-          <PriceChart snapshots={snapshots} xLabels={xLabels} category={category} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
+          <div className="flex gap-1 mb-2" style={{ flexWrap: 'wrap' }}>
+            {([
+              ['ema9', 'EMA9', COLOR_EMA9],
+              ['ema50', 'EMA50', COLOR_EMA50],
+              ['ema200', 'EMA200', COLOR_EMA200],
+              ...(snapshots.some(s => s.vwap !== null) ? [['vwap', 'VWAP', COLOR_VWAP] as const] : [])
+            ] as const).map(([key, label, color]) => {
+              const on = lineVisibility[key]
+              return (
+                <button
+                  key={key}
+                  onClick={() => toggleLine(key)}
+                  className="text-xs font-bold rounded"
+                  style={{
+                    padding: '3px 8px',
+                    background: on ? color : '#1f2937',
+                    border: `1px solid ${color}`,
+                    color: on ? '#111827' : color,
+                    opacity: on ? 1 : 0.7
+                  }}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+          <PriceChart snapshots={snapshots} xLabels={xLabels} category={category} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} visibility={lineVisibility} />
           <RSIChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
           <MACDChart snapshots={snapshots} xLabels={xLabels} hoveredIndex={hoveredIndex} onHover={setHoveredIndex} />
 
@@ -433,7 +508,7 @@ export const Indicators: React.FC = () => {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    {['Time', 'Close', 'RSI', 'MACD Hist', 'EMA50', 'EMA200', 'VWAP', 'Pattern'].map(h => (
+                    {['Time', 'Close', 'RSI', 'MACD Hist', 'EMA9', 'EMA50', 'EMA200', 'VWAP', 'Pattern'].map(h => (
                       <th key={h} className="text-xs text-gray-400" style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #374151' }}>
                         {h}
                       </th>
@@ -447,6 +522,7 @@ export const Indicators: React.FC = () => {
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(row.close_price)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>{fmt(row.rsi, 1)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>{fmt(row.macd_histogram, 3)}</td>
+                      <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(row.ema_9)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(row.ema_50)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${fmt(row.ema_200)}</td>
                       <td className="text-xs text-white" style={{ padding: '4px 8px' }}>{row.vwap !== null ? `$${fmt(row.vwap)}` : '—'}</td>

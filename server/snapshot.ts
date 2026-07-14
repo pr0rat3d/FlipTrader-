@@ -27,6 +27,7 @@ export const recordSnapshot = async (
   const rsiValues = calculateRSI(closes, 14)
   const macdData = calculateMACD(closes)
   const latestMacd = macdData[macdData.length - 1]
+  const ema9 = calculateEMA(closes, 9)
   const ema50 = calculateEMA(closes, 50)
   const ema200 = closes.length >= 200 ? calculateEMA(closes, 200) : null
   const atrValues = calculateATR(highs, lows, closes, 14)
@@ -45,6 +46,7 @@ export const recordSnapshot = async (
     macd_line: latestMacd?.MACD ?? null,
     macd_signal: latestMacd?.signal ?? null,
     macd_histogram: latestMacd?.histogram ?? null,
+    ema_9: ema9,
     ema_50: ema50,
     ema_200: ema200,
     vwap,
