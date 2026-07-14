@@ -3,9 +3,10 @@ import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { isMarketOpen, hasSessionClosedSince, nyDateKey } from '../../server/marketHours.js'
 import { getAccount, placeOrder, getOrder, findOptionContract, getOptionQuote } from '../../server/execution/alpacaClient.js'
-import { computeContractCount, tierPlanFor, ContractSizeSettings } from '../../server/execution/optionPositionSizing.js'
+import { computeContractCount, tierPlanFor, ContractSizeSettings, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET } from '../../server/execution/optionPositionSizing.js'
 import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import { suggestOptionStrike } from '../../src/lib/optionSuggestion.js'
+import { nyMinutesSinceMidnight } from '../../server/rvol.js'
 
 export const config = {
   maxDuration: 60
@@ -51,6 +52,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!isMarketOpen()) {
       return res.status(200).json({ success: true, skipped: true, reason: 'market closed' })
+    }
+
+    // A brand-new 0DTE position opened after the force-close cutoff would get
+    // immediately flattened by monitor-executions.ts on its very next poll -
+    // a pointless round-trip that only pays the bid-ask spread for zero
+    // chance to develop. No new entries once we're past that point.
+    if (nyMinutesSinceMidnight(new Date()) >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'past force-close cutoff, no new entries' })
     }
 
     const sizeSettings: ContractSizeSettings = {
