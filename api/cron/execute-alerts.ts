@@ -65,6 +65,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ success: true, skipped: true, reason: 'past force-close cutoff, no new entries' })
     }
 
+    // Hard cap on total entries per NY trading day - not contract count, not
+    // buy/sell activity, just how many separate positions get opened (e.g.
+    // 2 contracts on an IV attempt + 4 on one ORB breakout + 2 on another ORB
+    // breakout = 3 entries, done for the day). Counted as any position that
+    // actually got a real order placed (entry_order_id set), regardless of
+    // how it later resolved - an attempt that got skipped/rejected before
+    // placing an order doesn't consume a slot.
+    const { data: recentEntries, error: recentEntriesError } = await supabase
+      .from('option_positions')
+      .select('claimed_at')
+      .not('entry_order_id', 'is', null)
+      .order('claimed_at', { ascending: false })
+      .limit(50)
+    if (recentEntriesError) throw recentEntriesError
+
+    const today = nyDateKey(new Date())
+    // Mutable - re-checked inside the per-leg loop too (see below), not just
+    // once here, so a single run that finds multiple qualifying legs at once
+    // can't blow through the cap in one pass.
+    let entriesToday = (recentEntries || []).filter(e => nyDateKey(e.claimed_at) === today).length
+    if (entriesToday >= settingsRow.max_daily_entries) {
+      return res.status(200).json({
+        success: true, skipped: true, reason: `daily entry cap reached (${entriesToday}/${settingsRow.max_daily_entries})`
+      })
+    }
+
     const sizeSettings: ContractSizeSettings = {
       minAccountEquity: settingsRow.min_account_equity,
       maxAccountEquity: settingsRow.max_account_equity
@@ -91,6 +117,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let entered = 0
 
     for (const leg of legs as unknown as OpenLeg[]) {
+      if (entriesToday >= settingsRow.max_daily_entries) break
       if (alreadyClaimed.has(leg.id)) continue
 
       const direction = leg.day_trade_alerts?.macd_curl
@@ -209,6 +236,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           option_symbol: contract.symbol, contract_type: contractType, strike_price: contract.strikePrice, expiration_date: expirationDate,
           contracts: sizeResult.contracts, account_equity_at_entry: account.equity, entry_order_id: entryOrder.id
         }).eq('id', positionId)
+        // Counts toward the daily cap the moment an order is actually placed
+        // (matches the entry_order_id-not-null criterion the pre-loop count
+        // above uses), not only once a fill is confirmed - an order that's
+        // out at the broker already consumed a slot for the day regardless
+        // of how the fill poll below resolves.
+        entriesToday++
 
         let filled = false
         let fillPrice: number | null = null
