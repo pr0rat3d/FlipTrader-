@@ -73,20 +73,27 @@ export const detectRSIDivergence = (closes: number[], rsiValues: number[]): 'bul
   return null
 }
 
-export const detectMACDCurl = (macdData: any[]): 'bullish' | 'bearish' | null => {
+// `lookback` controls how many recent bars are searched for a crossover, not
+// just the latest one. A pure latest-bar check means a breakout/continuation
+// minutes after the actual cross (the normal case - crosses happen once,
+// moves play out over many bars after) reads as "no curl" even though MACD
+// never gave back the signal. Scans newest-to-oldest so a more recent
+// opposite-direction cross correctly wins over a stale one further back.
+export const detectMACDCurl = (macdData: any[], lookback: number = 1): 'bullish' | 'bearish' | null => {
   if (macdData.length < 2) return null
 
-  const current = macdData[macdData.length - 1]
-  const previous = macdData[macdData.length - 2]
+  const earliest = Math.max(1, macdData.length - lookback)
 
-  // Bullish: MACD crosses above signal line
-  if (previous.MACD < previous.signal && current.MACD > current.signal) {
-    return 'bullish'
-  }
+  for (let i = macdData.length - 1; i >= earliest; i--) {
+    const current = macdData[i]
+    const previous = macdData[i - 1]
 
-  // Bearish: MACD crosses below signal line
-  if (previous.MACD > previous.signal && current.MACD < current.signal) {
-    return 'bearish'
+    if (previous.MACD < previous.signal && current.MACD > current.signal) {
+      return 'bullish'
+    }
+    if (previous.MACD > previous.signal && current.MACD < current.signal) {
+      return 'bearish'
+    }
   }
 
   return null

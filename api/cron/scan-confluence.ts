@@ -2,7 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { getIntradayCandles, Candle } from '../../server/twelvedata.js'
 import { analyzeCandles } from '../../server/indicators.js'
-import { isMarketOpen } from '../../server/marketHours.js'
+import { isMarketOpen, nyDateKey } from '../../server/marketHours.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
@@ -91,7 +91,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const vwap = calculateSessionVWAP(candles)
       await recordSnapshot(symbol, 'day_trade', candles, { vwap })
 
-      const signal = analyzeCandles(closes)
+      // A MACD cross earlier in today's session still backs a breakout/
+      // continuation that plays out later - see analyzeCandles for why a
+      // bare latest-bar-only check misses exactly this (SPY, 2026-07-14:
+      // crossed bullish at the open, broke the opening range 17 min later
+      // with MACD never having given back the signal line - zero alerts
+      // fired all session because the cross and the breakout bar differed).
+      const today = nyDateKey(new Date())
+      const sessionBarCount = candles.filter(c => nyDateKey(c.datetime) === today).length
+      const signal = analyzeCandles(closes, sessionBarCount)
 
       if (signal) {
         const atrValues = calculateATR(candles.map(c => c.high), candles.map(c => c.low), closes, 14)
