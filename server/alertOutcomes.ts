@@ -21,6 +21,7 @@ export const deriveMilestonePrices = (entryPrice: number, target50ema: number): 
 export interface ProfitTargetRow {
   entry_price: number
   target_50ema_price: number
+  stop_loss_price: number | null
   milestone_10_price: number | null
   milestone_10_hit_at: string | null
   milestone_20_price: number | null
@@ -29,6 +30,7 @@ export interface ProfitTargetRow {
   milestone_30_hit_at: string | null
   max_favorable_pct: number | null
   target_hit_at: string | null
+  stopped_out_at: string | null
 }
 
 export interface PriceSampleUpdate {
@@ -39,7 +41,8 @@ export interface PriceSampleUpdate {
   milestone_20_hit_at?: string
   milestone_30_hit_at?: string
   target_hit_at?: string
-  status?: 'target_hit'
+  stopped_out_at?: string
+  status?: 'target_hit' | 'stopped_out'
 }
 
 // Direction-aware: applies one new price observation to an open profit_targets row,
@@ -72,6 +75,19 @@ export const applyPriceSample = (row: ProfitTargetRow, price: number, at: Date):
   if (!row.target_hit_at && crossed(row.target_50ema_price)) {
     update.target_hit_at = atISO
     update.status = 'target_hit'
+  }
+
+  // Stop is on the opposite side of entry from the target, so `crossed` (which
+  // asks "did price move FURTHER in the favorable direction") can't be reused
+  // here - this asks the opposite question, "did price move against the trade
+  // far enough to invalidate it." Checked after target_hit so a single sample
+  // that already resolved the trade as a win doesn't get overwritten by this.
+  const stoppedOut = (stopPrice: number | null) =>
+    stopPrice !== null && (isBullish ? price <= stopPrice : price >= stopPrice)
+
+  if (!row.target_hit_at && !row.stopped_out_at && !update.target_hit_at && stoppedOut(row.stop_loss_price)) {
+    update.stopped_out_at = atISO
+    update.status = 'stopped_out'
   }
 
   return Object.keys(update).length > 0 ? update : null

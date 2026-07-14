@@ -57,6 +57,19 @@ export const getTodayAlerts = async () => {
   return data
 }
 
+// Lightweight - just enough for the Dashboard to know whether each alert's
+// legs are still live (at least one 'open') or fully resolved (stopped_out/
+// expired/target_hit), without pulling every column getProfitTargets() does.
+export const getTodayLegStatuses = async (): Promise<{ id: string; day_trade_alert_id: string; status: string }[]> => {
+  const { data, error } = await supabase
+    .from('profit_targets')
+    .select('id, day_trade_alert_id, status')
+    .gte('entry_time', startOfTodayNY())
+
+  if (error) throw error
+  return data || []
+}
+
 export const getSwingAlerts = async () => {
   const { data, error } = await supabase
     .from('swing_trade_alerts')

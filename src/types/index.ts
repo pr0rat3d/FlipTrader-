@@ -57,7 +57,8 @@ export interface ProfitTarget {
   max_favorable_price: number | null;
   max_favorable_pct: number | null;
   max_favorable_at: string | null;
-  status: 'open' | 'target_hit' | 'expired';
+  status: 'open' | 'target_hit' | 'expired' | 'stopped_out';
+  stopped_out_at: string | null;
   created_at: string;
 }
 

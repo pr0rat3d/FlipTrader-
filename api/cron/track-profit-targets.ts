@@ -22,17 +22,18 @@ export const config = {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
-const checkOpenTargets = async (): Promise<{ hit: number; expired: number }> => {
+const checkOpenTargets = async (): Promise<{ hit: number; expired: number; stoppedOut: number }> => {
   const { data: targets, error } = await supabase
     .from('profit_targets')
     .select('*')
     .eq('status', 'open')
 
   if (error) throw error
-  if (!targets || targets.length === 0) return { hit: 0, expired: 0 }
+  if (!targets || targets.length === 0) return { hit: 0, expired: 0, stoppedOut: 0 }
 
   let hit = 0
   let expired = 0
+  let stoppedOut = 0
   const now = new Date()
 
   for (const target of targets) {
@@ -51,10 +52,11 @@ const checkOpenTargets = async (): Promise<{ hit: number; expired: number }> => 
     if (update) {
       await supabase.from('profit_targets').update(update).eq('id', target.id)
       if (update.status === 'target_hit') hit++
+      if (update.status === 'stopped_out') stoppedOut++
     }
   }
 
-  return { hit, expired }
+  return { hit, expired, stoppedOut }
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -63,15 +65,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     let targetsHit = 0
     let targetsExpired = 0
+    let targetsStoppedOut = 0
 
     for (let i = 0; i < CHECKS_PER_INVOCATION; i++) {
-      const { hit, expired } = await checkOpenTargets()
+      const { hit, expired, stoppedOut } = await checkOpenTargets()
       targetsHit += hit
       targetsExpired += expired
+      targetsStoppedOut += stoppedOut
       if (i < CHECKS_PER_INVOCATION - 1) await sleep(CHECK_INTERVAL_MS)
     }
 
-    res.status(200).json({ success: true, targetsHit, targetsExpired, checksRun: CHECKS_PER_INVOCATION })
+    res.status(200).json({ success: true, targetsHit, targetsExpired, targetsStoppedOut, checksRun: CHECKS_PER_INVOCATION })
   } catch (error) {
     console.error('Error tracking targets:', error)
     res.status(500).json({ error: String(error) })

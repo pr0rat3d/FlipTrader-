@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react'
 import { useAlerts } from '../hooks/useAlerts'
 import { useSwingAlerts } from '../hooks/useSwingAlerts'
 import { useLivePrices } from '../hooks/useLivePrices'
+import { useLegLiveStatus } from '../hooks/useLegLiveStatus'
 import { AlertCard } from './AlertCard'
 import { SwingAlertCard } from './SwingAlertCard'
 import { Alert } from '../types'
@@ -43,9 +44,16 @@ const alertDirection = (alert: Alert): string => alert.macd_curl ?? alert.rsi_di
 // recent - a fresh higher-confidence re-fire is real new evidence (entry/stop
 // have likely moved too), so it should visibly replace a weaker prior read
 // rather than get silently outranked by a more recent but weaker occurrence.
-const groupAlerts = (alerts: Alert[]): AlertGroup[] => {
+//
+// An occurrence whose legs have ALL resolved (stopped_out/expired - not just
+// still 'open') is excluded entirely before any of the above - a trade that
+// already stopped out shouldn't keep anchoring a "continuation" streak or
+// count toward it, even if a later same-direction re-fire is still live.
+const groupAlerts = (alerts: Alert[], isLive: (alertId: string) => boolean): AlertGroup[] => {
+  const liveAlerts = alerts.filter(a => isLive(a.id))
+
   const currentDirection = new Map<string, string>()
-  for (const alert of alerts) {
+  for (const alert of liveAlerts) {
     const key = slotKey(alert)
     if (!currentDirection.has(key)) currentDirection.set(key, alertDirection(alert))
   }
@@ -53,7 +61,7 @@ const groupAlerts = (alerts: Alert[]): AlertGroup[] => {
   const groups = new Map<string, AlertGroup>()
   const order: string[] = []
 
-  for (const alert of alerts) {
+  for (const alert of liveAlerts) {
     const key = slotKey(alert)
     if (alertDirection(alert) !== currentDirection.get(key)) continue
 
@@ -79,11 +87,12 @@ export const Dashboard: React.FC = () => {
   const { alerts: swingAlerts, loading: swingLoading } = useSwingAlerts()
   const [sortBy, setSortBy] = useState<'recent' | 'confidence'>('recent')
   const livePrices = useLivePrices(DAY_TRADE_INDICES)
+  const { isLive } = useLegLiveStatus()
 
   // Groups are already in newest-occurrence-first order for 'recent' (the
   // `order` array records first-seen-during-iteration, which walks the
   // already-newest-first `alerts` list).
-  const groupedAlerts = useMemo(() => groupAlerts(alerts), [alerts])
+  const groupedAlerts = useMemo(() => groupAlerts(alerts, isLive), [alerts, isLive])
 
   const sortedGroups = useMemo(() => {
     if (sortBy === 'recent') return groupedAlerts
