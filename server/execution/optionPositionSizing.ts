@@ -11,6 +11,16 @@ const TIER_PLANS: Record<number, number[]> = {
 export const RUNNER_TIER_NUMBER = 99
 export const RUNNER_TARGET_PCT = 1.00
 
+// IV is a reversal-at-a-level signal, and the first half hour of the session
+// is exactly when levels get tested and violated repeatedly as the opening
+// auction resolves - noisier, less reliable reversals than later in the day.
+// ORB doesn't need an equivalent gate: its own 15-min opening-range window is
+// already a natural "wait" built into the signal itself, and a breakout
+// confirmation right after that window closes is a legitimate, intended case,
+// not noise to filter out.
+export const MARKET_OPEN_MINUTES_ET = 9 * 60 + 30
+export const IV_ELIGIBLE_AFTER_MINUTES = 30
+
 // After 3:00pm ET, a runner that's made it to at least +50% gets sold at
 // market rather than risked on reaching +100% before the 3:45 force-close -
 // one that hasn't reached +50% yet is left alone (no forced action) to settle

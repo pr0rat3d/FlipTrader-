@@ -3,7 +3,10 @@ import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { isMarketOpen, hasSessionClosedSince, nyDateKey } from '../../server/marketHours.js'
 import { getAccount, placeOrder, getOrder, findOptionContract, getOptionQuote } from '../../server/execution/alpacaClient.js'
-import { computeContractCount, tierPlanFor, ContractSizeSettings, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET } from '../../server/execution/optionPositionSizing.js'
+import {
+  computeContractCount, tierPlanFor, ContractSizeSettings,
+  FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES
+} from '../../server/execution/optionPositionSizing.js'
 import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import { suggestOptionStrike } from '../../src/lib/optionSuggestion.js'
 import { nyMinutesSinceMidnight } from '../../server/rvol.js'
@@ -94,6 +97,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const confidence = leg.day_trade_alerts?.confidence ?? 0
       if (!direction) continue
       if (confidence < settingsRow.min_confidence) continue
+
+      // IV only - ORB's own 15-min opening-range window is already a
+      // sufficient "wait," see optionPositionSizing.ts.
+      if (
+        leg.day_trade_alerts?.ttf_status === 'IV' &&
+        nyMinutesSinceMidnight(new Date()) < MARKET_OPEN_MINUTES_ET + IV_ELIGIBLE_AFTER_MINUTES
+      ) continue
 
       const { data: claimed, error: claimError } = await supabase
         .from('option_positions')
