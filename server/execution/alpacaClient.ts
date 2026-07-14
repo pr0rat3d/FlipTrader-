@@ -177,3 +177,97 @@ export const getBars1Min = async (symbol: string, start: Date, end: Date): Promi
     return null
   }
 }
+
+export interface OptionContract {
+  symbol: string
+  strikePrice: number
+}
+
+// Widens the strike search a few dollars around the desired strike rather than
+// requiring an exact match - not every whole-dollar strike is necessarily
+// listed for every expiration, so this picks the closest one that actually is.
+export const findOptionContract = async (
+  underlyingSymbol: string,
+  expirationDate: string,
+  desiredStrike: number,
+  contractType: 'call' | 'put'
+): Promise<OptionContract | null> => {
+  try {
+    const response = await http.get(`${tradingBaseUrl()}/v2/options/contracts`, {
+      headers: tradingHeaders(),
+      params: {
+        underlying_symbols: underlyingSymbol,
+        expiration_date: expirationDate,
+        strike_price_gte: (desiredStrike - 3).toFixed(2),
+        strike_price_lte: (desiredStrike + 3).toFixed(2),
+        type: contractType,
+        status: 'active'
+      }
+    })
+    const contracts: any[] = response.data?.option_contracts ?? []
+    if (contracts.length === 0) return null
+
+    let closest = contracts[0]
+    let closestDiff = Math.abs(parseFloat(closest.strike_price) - desiredStrike)
+    for (const c of contracts) {
+      const diff = Math.abs(parseFloat(c.strike_price) - desiredStrike)
+      if (diff < closestDiff) {
+        closest = c
+        closestDiff = diff
+      }
+    }
+
+    return { symbol: closest.symbol, strikePrice: parseFloat(closest.strike_price) }
+  } catch (error) {
+    console.error(`Error finding option contract for ${underlyingSymbol} ${expirationDate} ${desiredStrike}${contractType}:`, error)
+    return null
+  }
+}
+
+export interface OptionQuote {
+  bid: number
+  ask: number
+}
+
+export const getOptionQuote = async (optionSymbol: string): Promise<OptionQuote | null> => {
+  try {
+    const response = await http.get(`${dataBaseUrl()}/v1beta1/options/quotes/latest`, {
+      headers: tradingHeaders(),
+      params: { symbols: optionSymbol }
+    })
+    const q = response.data?.quotes?.[optionSymbol]
+    if (!q || typeof q.bp !== 'number' || typeof q.ap !== 'number') return null
+    return { bid: q.bp, ask: q.ap }
+  } catch (error) {
+    console.error(`Error fetching option quote for ${optionSymbol}:`, error)
+    return null
+  }
+}
+
+export interface OptionBar {
+  t: string
+  o: number
+  h: number
+  l: number
+  c: number
+  v: number
+}
+
+export const getOptionBars1Min = async (optionSymbol: string, start: Date, end: Date): Promise<OptionBar[] | null> => {
+  try {
+    const response = await http.get(`${dataBaseUrl()}/v1beta1/options/bars`, {
+      headers: tradingHeaders(),
+      params: {
+        symbols: optionSymbol,
+        timeframe: '1Min',
+        start: start.toISOString(),
+        end: end.toISOString(),
+        limit: 50
+      }
+    })
+    return response.data?.bars?.[optionSymbol] ?? []
+  } catch (error) {
+    console.error(`Error fetching option 1-min bars for ${optionSymbol}:`, error)
+    return null
+  }
+}

@@ -11,3 +11,14 @@ export const clientOrderIds = (profitTargetId: string) => ({
   tier3: `tier3-${profitTargetId}`,
   hardStop: `hardstop-${profitTargetId}`
 })
+
+// Options positions have a variable number of tiers (1-4 fixed tiers + a
+// runner, depending on contract count), unlike shares' fixed tier1/2/3 - a
+// tier(n) function instead of fixed named keys.
+export const optionClientOrderIds = (profitTargetId: string) => ({
+  entry: `opt-entry-${profitTargetId}`,
+  hardStop: `opt-hardstop-${profitTargetId}`,
+  timeLock: `opt-timelock-${profitTargetId}`,
+  forceClose: `opt-forceclose-${profitTargetId}`,
+  tier: (tierNumber: number) => `opt-tier${tierNumber}-${profitTargetId}`
+})

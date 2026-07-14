@@ -3,9 +3,13 @@ import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
-import { getOrder, cancelOrder, replaceOrder, placeOrder, getBars1Min } from '../../server/execution/alpacaClient.js'
-import { placeProtectiveOrders } from '../../server/execution/protectiveOrders.js'
-import { clientOrderIds } from '../../server/execution/clientOrderIds.js'
+import { getOrder, placeOrder, getOptionQuote, getOptionBars1Min } from '../../server/execution/alpacaClient.js'
+import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
+import {
+  RUNNER_TIME_LOCK_HOUR_ET, RUNNER_TIME_LOCK_MINUTE_ET, RUNNER_TIME_LOCK_MIN_PCT,
+  FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET
+} from '../../server/execution/optionPositionSizing.js'
+import { nyMinutesSinceMidnight } from '../../server/rvol.js'
 
 export const config = {
   maxDuration: 60
@@ -20,252 +24,227 @@ export const config = {
 const RECONCILE_GRACE_MS = 2 * 60 * 1000
 const MAX_RECONCILE_ATTEMPTS = 3
 
-interface ExecutionRow {
+interface Tier {
   id: string
-  profit_target_id: string
-  symbol: string
-  direction: 'bullish' | 'bearish'
-  execution_status: string
-  qty: number | null
-  remaining_qty: number | null
-  entry_order_id: string | null
-  stop_order_id: string | null
-  tier1_order_id: string | null
-  tier2_order_id: string | null
-  tier3_order_id: string | null
-  reconciliation_attempts: number
-  claimed_at: string
-  profit_targets: {
-    entry_price: number
-    stop_loss_price: number | null
-    milestone_10_price: number | null
-    milestone_20_price: number | null
-    milestone_30_price: number | null
-  } | null
+  tier_number: number
+  is_runner: boolean
+  target_pct: number
+  filled_at: string | null
 }
 
-const cancelIfOpen = async (orderId: string | null) => {
-  if (!orderId) return
-  const order = await getOrder(orderId)
-  if (order && ['new', 'accepted', 'partially_filled', 'pending_new'].includes(order.status)) {
-    await cancelOrder(orderId)
-  }
+interface Position {
+  id: string
+  profit_target_id: string
+  underlying_symbol: string
+  option_symbol: string | null
+  status: string
+  contracts: number | null
+  remaining_contracts: number | null
+  premium_entry: number | null
+  stop_pct: number | null
+  entry_order_id: string | null
+  claimed_at: string
+  reconciliation_attempts: number
+  option_position_tiers: Tier[]
 }
 
 const notifyManualReview = async (symbol: string, reason: string) => {
-  await sendToTopic(ALERTS_TOPIC, `Bot: manual review needed (${symbol})`, reason)
+  await sendToTopic(ALERTS_TOPIC, `Options bot: manual review (${symbol})`, reason)
+}
+
+const sellAtMarket = async (optionSymbol: string, qty: number, clientOrderId: string): Promise<{ orderId: string | null; failure: string | null }> => {
+  try {
+    const order = await placeOrder({ symbol: optionSymbol, qty, side: 'sell', type: 'market', timeInForce: 'day', clientOrderId })
+    return { orderId: order.id, failure: null }
+  } catch (e) {
+    return { orderId: null, failure: String(e) }
+  }
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
 
   try {
-    const { data: settingsRow, error: settingsError } = await supabase
-      .from('execution_settings')
-      .select('hard_stop_pct')
-      .eq('id', 1)
-      .single()
-    if (settingsError) throw settingsError
-    const hardStopPct = settingsRow.hard_stop_pct as number
+    const { data: positions, error: positionsError } = await supabase
+      .from('option_positions')
+      .select('*, option_position_tiers(*)')
+      .in('status', ['claimed', 'entry_submitted', 'open'])
 
-    const { data: rows, error: rowsError } = await supabase
-      .from('trade_executions')
-      .select('*, profit_targets(entry_price, stop_loss_price, milestone_10_price, milestone_20_price, milestone_30_price)')
-      .in('execution_status', ['claimed', 'entry_submitted', 'entry_filled', 'protective_orders_placed', 'protective_orders_partial'])
+    if (positionsError) throw positionsError
+    if (!positions || positions.length === 0) {
+      return res.status(200).json({ success: true, managed: 0, closed: 0 })
+    }
 
-    if (rowsError) throw rowsError
+    const now = new Date()
+    const minutesNow = nyMinutesSinceMidnight(now)
+    const pastForceClose = minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET
+    const pastTimeLock = minutesNow >= RUNNER_TIME_LOCK_HOUR_ET * 60 + RUNNER_TIME_LOCK_MINUTE_ET
 
     let managed = 0
     let closed = 0
 
-    for (const row of (rows || []) as ExecutionRow[]) {
+    for (const position of (positions || []) as Position[]) {
+      const ids = optionClientOrderIds(position.profit_target_id)
+
       try {
         // --- Stuck claim/entry-submit reconciliation ---
-        if (row.execution_status === 'claimed' || row.execution_status === 'entry_submitted') {
-          const stuckMs = Date.now() - new Date(row.claimed_at).getTime()
+        if (position.status === 'claimed' || position.status === 'entry_submitted') {
+          const stuckMs = Date.now() - new Date(position.claimed_at).getTime()
           if (stuckMs < RECONCILE_GRACE_MS) continue
 
-          if (row.execution_status === 'entry_submitted' && row.entry_order_id) {
-            const entryOrder = await getOrder(row.entry_order_id)
+          if (position.status === 'entry_submitted' && position.entry_order_id) {
+            const entryOrder = await getOrder(position.entry_order_id)
             if (entryOrder?.status === 'filled') {
-              await supabase.from('trade_executions').update({
-                execution_status: 'entry_filled', qty: Math.round(parseFloat(entryOrder.filled_qty)), remaining_qty: Math.round(parseFloat(entryOrder.filled_qty))
-              }).eq('id', row.id)
+              await supabase.from('option_positions').update({
+                status: 'open',
+                premium_entry: entryOrder.filled_avg_price ? parseFloat(entryOrder.filled_avg_price) : null,
+                remaining_contracts: Math.round(parseFloat(entryOrder.filled_qty))
+              }).eq('id', position.id)
               continue
             }
             if (entryOrder && ['canceled', 'expired', 'rejected'].includes(entryOrder.status)) {
-              await supabase.from('trade_executions').update({ execution_status: 'entry_failed' }).eq('id', row.id)
+              await supabase.from('option_positions').update({ status: 'entry_failed' }).eq('id', position.id)
               continue
             }
           }
 
-          const attempts = row.reconciliation_attempts + 1
+          const attempts = position.reconciliation_attempts + 1
           if (attempts >= MAX_RECONCILE_ATTEMPTS) {
-            await supabase.from('trade_executions').update({
+            await supabase.from('option_positions').update({
               needs_manual_review: true, review_reason: 'entry stuck past reconciliation retry cap', reconciliation_attempts: attempts
-            }).eq('id', row.id)
-            await notifyManualReview(row.symbol, 'Entry order stuck, needs manual review')
+            }).eq('id', position.id)
+            await notifyManualReview(position.underlying_symbol, 'Entry order stuck, needs manual review')
           } else {
-            await supabase.from('trade_executions').update({ reconciliation_attempts: attempts }).eq('id', row.id)
+            await supabase.from('option_positions').update({ reconciliation_attempts: attempts }).eq('id', position.id)
           }
           continue
         }
 
-        if (!row.profit_targets || !row.qty) continue
+        if (!position.option_symbol || !position.remaining_contracts || position.remaining_contracts <= 0 || position.premium_entry === null) continue
         managed++
-        const isBullish = row.direction === 'bullish'
-        const exitSide = isBullish ? 'sell' : 'buy'
-        const entryPrice = row.profit_targets.entry_price
 
-        // --- Reconciliation for partially-placed protective orders ---
-        if (row.execution_status === 'protective_orders_partial' && row.reconciliation_attempts < MAX_RECONCILE_ATTEMPTS) {
-          const alloc = {
-            tier1: row.tier1_order_id ? 0 : Math.floor(row.qty * 0.3),
-            tier2: row.tier2_order_id ? 0 : Math.floor(row.qty * 0.3),
-            tier3: row.tier3_order_id ? 0 : Math.floor(row.qty * 0.3)
-          }
-          const result = await placeProtectiveOrders(
-            {
-              symbol: row.symbol, exitSide, qty: row.remaining_qty ?? row.qty,
-              stopPrice: row.profit_targets.stop_loss_price ?? entryPrice,
-              tierQty: alloc,
-              tierPrices: {
-                tier1: row.profit_targets.milestone_10_price ?? entryPrice,
-                tier2: row.profit_targets.milestone_20_price ?? entryPrice,
-                tier3: row.profit_targets.milestone_30_price ?? entryPrice
-              },
-              ids: clientOrderIds(row.profit_target_id)
-            },
-            { stopOrderId: row.stop_order_id, tier1OrderId: row.tier1_order_id, tier2OrderId: row.tier2_order_id, tier3OrderId: row.tier3_order_id }
-          )
-          const attempts = row.reconciliation_attempts + 1
-          const stillPartial = !!result.failure
-          await supabase.from('trade_executions').update({
-            execution_status: stillPartial ? 'protective_orders_partial' : 'protective_orders_placed',
-            stop_order_id: result.stopOrderId,
-            tier1_order_id: result.tier1OrderId,
-            tier2_order_id: result.tier2OrderId,
-            tier3_order_id: result.tier3OrderId,
-            reconciliation_attempts: attempts,
-            needs_manual_review: stillPartial && attempts >= MAX_RECONCILE_ATTEMPTS,
-            review_reason: stillPartial ? result.failure : null
-          }).eq('id', row.id)
-          if (stillPartial && attempts >= MAX_RECONCILE_ATTEMPTS) {
-            await notifyManualReview(row.symbol, `Protective orders still incomplete after ${attempts} attempts: ${result.failure}`)
-          }
-          row.stop_order_id = result.stopOrderId
-          row.tier1_order_id = result.tier1OrderId
-          row.tier2_order_id = result.tier2OrderId
-          row.tier3_order_id = result.tier3OrderId
-        }
-
-        // --- Has the resting stop already filled? ---
-        if (row.stop_order_id) {
-          const stopOrder = await getOrder(row.stop_order_id)
-          if (stopOrder?.status === 'filled') {
-            await cancelIfOpen(row.tier1_order_id)
-            await cancelIfOpen(row.tier2_order_id)
-            await cancelIfOpen(row.tier3_order_id)
-            await supabase.from('trade_executions').update({ execution_status: 'closed_stop', remaining_qty: 0 }).eq('id', row.id)
+        // --- Force-close: unconditional past 3:45pm ET, regardless of any
+        // other condition - 0DTE contracts should never ride into expiration
+        // mechanics unmonitored. ---
+        if (pastForceClose) {
+          const result = await sellAtMarket(position.option_symbol, position.remaining_contracts, ids.forceClose)
+          if (result.orderId) {
+            await supabase.from('option_positions').update({
+              status: 'closed_force_close', remaining_contracts: 0, closed_at: now.toISOString()
+            }).eq('id', position.id)
             closed++
-            continue
+          } else {
+            await supabase.from('option_positions').update({
+              needs_manual_review: true, review_reason: `force-close flatten failed: ${result.failure}`
+            }).eq('id', position.id)
+            await notifyManualReview(position.underlying_symbol, `CRITICAL: 3:45pm force-close failed to flatten - ${result.failure}`)
           }
-        }
-
-        // --- Tier fill detection + stop ratchet ---
-        const tierOrderFields: Array<{ key: 'tier1' | 'tier2' | 'tier3'; id: string | null }> = [
-          { key: 'tier1', id: row.tier1_order_id },
-          { key: 'tier2', id: row.tier2_order_id },
-          { key: 'tier3', id: row.tier3_order_id }
-        ]
-        let filledTierQty = 0
-        let placedTierCount = 0
-        let filledTierCount = 0
-        for (const tier of tierOrderFields) {
-          if (!tier.id) continue
-          placedTierCount++
-          const order = await getOrder(tier.id)
-          if (!order) continue
-          filledTierQty += parseFloat(order.filled_qty) || 0
-          if (order.status === 'filled') filledTierCount++
-        }
-
-        const remainingQty = row.qty - Math.round(filledTierQty)
-
-        if (remainingQty <= 0) {
-          await cancelIfOpen(row.stop_order_id)
-          await supabase.from('trade_executions').update({ execution_status: 'closed_target', remaining_qty: 0 }).eq('id', row.id)
-          closed++
           continue
         }
 
-        const allTiersFilled = placedTierCount > 0 && filledTierCount === placedTierCount
-        const desiredStopPrice = allTiersFilled ? entryPrice : (row.profit_targets.stop_loss_price ?? entryPrice)
+        const quote = await getOptionQuote(position.option_symbol)
+        if (!quote) continue
 
-        if (row.stop_order_id) {
-          const currentStop = await getOrder(row.stop_order_id)
-          const currentQty = currentStop ? Math.round(parseFloat(currentStop.qty)) : null
-          const needsQtyUpdate = currentQty !== null && currentQty !== remainingQty
-          const needsPriceUpdate = allTiersFilled // only ever ratchets one direction, to breakeven
-          if (currentStop && (needsQtyUpdate || needsPriceUpdate)) {
-            try {
-              await replaceOrder(row.stop_order_id, { qty: remainingQty, stopPrice: desiredStopPrice })
-            } catch (e) {
-              await supabase.from('trade_executions').update({
-                needs_manual_review: true, review_reason: `failed to ratchet stop: ${String(e)}`
-              }).eq('id', row.id)
-              await notifyManualReview(row.symbol, `Failed to ratchet resting stop: ${String(e)}`)
-            }
-          }
-        }
-
-        if (remainingQty !== (row.remaining_qty ?? row.qty)) {
-          await supabase.from('trade_executions').update({ remaining_qty: remainingQty }).eq('id', row.id)
-        }
-
-        // --- Catastrophic backstop: hard_stop_pct on a CLOSED 1-min candle ---
-        // Independent of the resting stop above - covers gap-throughs or a
-        // resting stop order that was rejected/cancelled for some reason.
-        const now = new Date()
-        const bars = await getBars1Min(row.symbol, new Date(now.getTime() - 10 * 60 * 1000), now)
+        // --- Hard stop: on a CLOSED 1-min candle of the OPTION's own price,
+        // not a wick - mirrors the shares model's catastrophic backstop
+        // pattern, just watching the option instead of the underlying.
+        // stop_pct starts at execution_settings.hard_stop_pct (30%) and
+        // ratchets to 0 (breakeven) the moment the first tier sells.
+        const bars = await getOptionBars1Min(position.option_symbol, new Date(now.getTime() - 10 * 60 * 1000), now)
         const closedBars = (bars || []).filter(b => new Date(b.t).getTime() + 60_000 <= now.getTime())
         const lastClosed = closedBars[closedBars.length - 1]
 
         if (lastClosed) {
-          const adverseMove = isBullish
-            ? (entryPrice - lastClosed.c) / entryPrice
-            : (lastClosed.c - entryPrice) / entryPrice
+          const adverseMove = (position.premium_entry - lastClosed.c) / position.premium_entry
+          const stopPct = position.stop_pct ?? 0.30
 
-          if (adverseMove >= hardStopPct) {
-            await cancelIfOpen(row.stop_order_id)
-            await cancelIfOpen(row.tier1_order_id)
-            await cancelIfOpen(row.tier2_order_id)
-            await cancelIfOpen(row.tier3_order_id)
-
-            try {
-              await placeOrder({
-                symbol: row.symbol, qty: remainingQty, side: exitSide, type: 'market', timeInForce: 'day',
-                clientOrderId: clientOrderIds(row.profit_target_id).hardStop
-              })
-              await supabase.from('trade_executions').update({
-                execution_status: 'closed_hard_stop', remaining_qty: 0,
-                needs_manual_review: true, review_reason: `hard stop triggered: ${(adverseMove * 100).toFixed(1)}% adverse on closed candle`
-              }).eq('id', row.id)
-              await notifyManualReview(row.symbol, `Hard stop triggered - flattened at market (${(adverseMove * 100).toFixed(1)}% adverse move)`)
+          if (adverseMove >= stopPct) {
+            const result = await sellAtMarket(position.option_symbol, position.remaining_contracts, ids.hardStop)
+            if (result.orderId) {
+              await supabase.from('option_positions').update({
+                status: stopPct > 0 ? 'closed_hard_stop' : 'closed_stop',
+                remaining_contracts: 0, closed_at: now.toISOString(),
+                review_reason: `stop triggered: ${(adverseMove * 100).toFixed(1)}% adverse on closed candle (threshold ${(stopPct * 100).toFixed(0)}%)`
+              }).eq('id', position.id)
+              await notifyManualReview(position.underlying_symbol, `Stop triggered - flattened at market (${(adverseMove * 100).toFixed(1)}% adverse)`)
               closed++
-            } catch (e) {
-              await supabase.from('trade_executions').update({
-                needs_manual_review: true, review_reason: `hard stop flatten failed: ${String(e)}`
-              }).eq('id', row.id)
-              await notifyManualReview(row.symbol, `CRITICAL: hard stop triggered but flatten order failed: ${String(e)}`)
+            } else {
+              await supabase.from('option_positions').update({
+                needs_manual_review: true, review_reason: `stop flatten failed: ${result.failure}`
+              }).eq('id', position.id)
+              await notifyManualReview(position.underlying_symbol, `CRITICAL: stop triggered but flatten failed - ${result.failure}`)
+            }
+            continue
+          }
+        }
+
+        // --- Tier fills: fixed tiers in ascending order, then the runner ---
+        const tiers = (position.option_position_tiers || []).sort((a, b) => a.tier_number - b.tier_number)
+        const unfilledFixed = tiers.filter(t => !t.is_runner && !t.filled_at)
+        const runner = tiers.find(t => t.is_runner)
+
+        const currentPct = (quote.bid - position.premium_entry) / position.premium_entry
+        let remaining = position.remaining_contracts
+        let anyTierFilledThisRun = false
+
+        for (const tier of unfilledFixed) {
+          // Tiers are ascending by target_pct - stop at the first threshold
+          // not yet met rather than checking the rest.
+          if (currentPct < tier.target_pct) break
+          if (remaining <= 1) break // always leave the runner's 1 contract
+
+          const result = await sellAtMarket(position.option_symbol, 1, ids.tier(tier.tier_number))
+          if (!result.orderId) {
+            await supabase.from('option_positions').update({
+              needs_manual_review: true, review_reason: `tier ${tier.tier_number} sell failed: ${result.failure}`
+            }).eq('id', position.id)
+            await notifyManualReview(position.underlying_symbol, `Tier ${tier.tier_number} sell failed - ${result.failure}`)
+            break
+          }
+          await supabase.from('option_position_tiers').update({
+            filled_at: now.toISOString(), fill_price: quote.bid, order_id: result.orderId
+          }).eq('id', tier.id)
+          remaining -= 1
+          anyTierFilledThisRun = true
+        }
+
+        // --- Runner: hard +100% target, or a post-3pm lock-in at +50% if it
+        // hasn't reached target yet. Otherwise left alone to settle wherever
+        // it lands until either fires or the 3:45 force-close takes it. ---
+        let runnerClosed = false
+        if (runner && !runner.filled_at && remaining >= 1) {
+          const hitTarget = currentPct >= runner.target_pct
+          const timeLockEligible = pastTimeLock && currentPct >= RUNNER_TIME_LOCK_MIN_PCT
+
+          if (hitTarget || timeLockEligible) {
+            const result = await sellAtMarket(position.option_symbol, remaining, ids.tier(runner.tier_number))
+            if (result.orderId) {
+              await supabase.from('option_position_tiers').update({
+                filled_at: now.toISOString(), fill_price: quote.bid, order_id: result.orderId
+              }).eq('id', runner.id)
+              await supabase.from('option_positions').update({
+                status: hitTarget ? 'closed_target' : 'closed_time_lock',
+                remaining_contracts: 0, closed_at: now.toISOString()
+              }).eq('id', position.id)
+              runnerClosed = true
+              closed++
+            } else {
+              await supabase.from('option_positions').update({
+                needs_manual_review: true, review_reason: `runner sell failed: ${result.failure}`
+              }).eq('id', position.id)
+              await notifyManualReview(position.underlying_symbol, `Runner sell failed - ${result.failure}`)
             }
           }
         }
-      } catch (rowError) {
-        console.error(`Error monitoring execution ${row.id} (${row.symbol}):`, rowError)
-        await supabase.from('trade_executions').update({
-          needs_manual_review: true, review_reason: String(rowError)
-        }).eq('id', row.id)
+
+        if (!runnerClosed && anyTierFilledThisRun) {
+          await supabase.from('option_positions').update({ remaining_contracts: remaining, stop_pct: 0 }).eq('id', position.id)
+        }
+      } catch (positionError) {
+        console.error(`Error managing option position ${position.id} (${position.underlying_symbol}):`, positionError)
+        await supabase.from('option_positions').update({
+          needs_manual_review: true, review_reason: String(positionError)
+        }).eq('id', position.id)
       }
     }
 

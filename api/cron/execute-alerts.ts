@@ -1,46 +1,37 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
-import { isMarketOpen, hasSessionClosedSince } from '../../server/marketHours.js'
-import { getQuote } from '../../server/finnhub.js'
-import { getAccount, placeOrder, getOrder } from '../../server/execution/alpacaClient.js'
-import { computeOrderPlan, allocateScaleOutQty, isQuietSkipReason, OrderPlanSettings } from '../../server/execution/positionSizing.js'
-import { clientOrderIds } from '../../server/execution/clientOrderIds.js'
-import { placeProtectiveOrders } from '../../server/execution/protectiveOrders.js'
+import { isMarketOpen, hasSessionClosedSince, nyDateKey } from '../../server/marketHours.js'
+import { getAccount, placeOrder, getOrder, findOptionContract, getOptionQuote } from '../../server/execution/alpacaClient.js'
+import { computeContractCount, tierPlanFor, ContractSizeSettings } from '../../server/execution/optionPositionSizing.js'
+import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
+import { suggestOptionStrike } from '../../src/lib/optionSuggestion.js'
 
 export const config = {
   maxDuration: 60
 }
 
-// A market order should fill almost immediately in liquid names like these -
-// poll briefly rather than assuming instant fill, but don't wait long.
+// A market order should fill almost immediately in a liquid 0DTE SPY/QQQ/IWM
+// chain - poll briefly rather than assuming instant fill, but don't wait long.
 const FILL_POLL_ATTEMPTS = 8
 const FILL_POLL_INTERVAL_MS = 1000
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-
-// A market order chasing a signal that already moved is worse than no trade -
-// skip if the current price has drifted too far from the alert's entry_price
-// since this cron runs on a 1-2 min cadence, not instantly on signal creation.
-const STALENESS_THRESHOLD_PCT = 0.005
 
 interface OpenLeg {
   id: string
   symbol: string
   entry_price: number
   entry_time: string
-  stop_loss_price: number | null
-  milestone_10_price: number | null
-  milestone_20_price: number | null
-  milestone_30_price: number | null
-  // A profit_targets row's day_trade_alert_id is a many-to-one FK (many legs,
-  // one alert) - PostgREST embeds a many-to-one relationship as a single
-  // object, not an array. Confirmed empirically against the live API (2026-
-  // 07-14): a leg.day_trade_alerts?.[0]?.macd_curl read here was silently
-  // undefined on every single leg, forever, since `[0]` indexes into a plain
-  // object rather than an array - the execution bot had never once actually
-  // claimed a trade since it was built, despite legs clearing confidence and
-  // is_enabled being true the whole time.
-  day_trade_alerts: { macd_curl: 'bullish' | 'bearish'; confidence: number | null } | null
+  target_50ema_price: number
+  // See execute-alerts.ts git history (2026-07-14) for why this is a single
+  // object, not an array - a many-to-one FK embeds as an object in PostgREST.
+  day_trade_alerts: {
+    macd_curl: 'bullish' | 'bearish'
+    confidence: number | null
+    ttf_status: string
+    confluence_level: number | null
+    indices_triggered: string[]
+  } | null
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -62,17 +53,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ success: true, skipped: true, reason: 'market closed' })
     }
 
-    const settings: OrderPlanSettings = {
-      riskPct: settingsRow.risk_pct,
-      minQty: settingsRow.min_qty,
-      maxQty: settingsRow.max_qty,
+    const sizeSettings: ContractSizeSettings = {
       minAccountEquity: settingsRow.min_account_equity,
       maxAccountEquity: settingsRow.max_account_equity
     }
 
     const { data: legs, error: legsError } = await supabase
       .from('profit_targets')
-      .select('id, symbol, entry_price, entry_time, stop_loss_price, milestone_10_price, milestone_20_price, milestone_30_price, day_trade_alerts(macd_curl, confidence)')
+      .select('id, symbol, entry_price, entry_time, target_50ema_price, day_trade_alerts(macd_curl, confidence, ttf_status, confluence_level, indices_triggered)')
       .eq('status', 'open')
 
     if (legsError) throw legsError
@@ -80,10 +68,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ success: true, processed: 0 })
     }
 
-    // Skip legs that already have a trade_executions row (claimed by this or a
-    // prior overlapping invocation) in one query rather than N.
     const { data: existing, error: existingError } = await supabase
-      .from('trade_executions')
+      .from('option_positions')
       .select('profit_target_id')
       .in('profit_target_id', legs.map((l: any) => l.id))
     if (existingError) throw existingError
@@ -92,11 +78,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let processed = 0
     let entered = 0
 
-    // supabase-js's inferred type for this embed says array (it can't statically
-    // know the FK is many-to-one), but the actual runtime shape - confirmed
-    // empirically against the live API - is a single object. Cast through
-    // unknown rather than "fixing" this back to array indexing, which is
-    // exactly the mismatch that caused this bug in the first place.
     for (const leg of legs as unknown as OpenLeg[]) {
       if (alreadyClaimed.has(leg.id)) continue
 
@@ -105,146 +86,159 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!direction) continue
       if (confidence < settingsRow.min_confidence) continue
 
-      // Atomic claim - INSERT ... ON CONFLICT DO NOTHING is safe by construction
-      // (unique-index conflict resolution), unlike a SELECT-then-UPDATE pattern
-      // which would be vulnerable to two overlapping cron invocations both
-      // reading "unclaimed" before either writes.
       const { data: claimed, error: claimError } = await supabase
-        .from('trade_executions')
-        .insert({ profit_target_id: leg.id, symbol: leg.symbol, direction })
+        .from('option_positions')
+        .insert({ profit_target_id: leg.id, underlying_symbol: leg.symbol, direction })
         .select()
       if (claimError) {
-        // Unique violation just means another invocation claimed it first - skip silently.
         if ((claimError as any).code === '23505') continue
         throw claimError
       }
       if (!claimed || claimed.length === 0) continue
 
-      const executionId = claimed[0].id
+      const positionId = claimed[0].id
       processed++
 
       try {
         if (hasSessionClosedSince(new Date(leg.entry_time))) {
-          await supabase.from('trade_executions').update({ execution_status: 'skipped_session_closed' }).eq('id', executionId)
+          await supabase.from('option_positions').update({ status: 'skipped_bad_data', review_reason: 'session already closed' }).eq('id', positionId)
           continue
         }
 
         const account = await getAccount()
         if (!account) {
-          await supabase.from('trade_executions').update({
-            execution_status: 'needs_manual_review', needs_manual_review: true, review_reason: 'failed to fetch Alpaca account'
-          }).eq('id', executionId)
+          await supabase.from('option_positions').update({
+            status: 'needs_manual_review', needs_manual_review: true, review_reason: 'failed to fetch Alpaca account'
+          }).eq('id', positionId)
           continue
         }
 
-        const plan = computeOrderPlan({
-          direction,
-          entryPrice: leg.entry_price,
-          stopLossPrice: leg.stop_loss_price,
-          milestone10Price: leg.milestone_10_price,
-          milestone20Price: leg.milestone_20_price,
-          milestone30Price: leg.milestone_30_price,
-          accountEquity: account.equity,
-          buyingPower: account.buying_power
-        }, settings)
+        // IV's thesis is a reversal AT the confluence level - only the
+        // representative symbol's confluence_level is meaningful (it's
+        // computed from ONE symbol's candles and stored once per alert, not
+        // per leg - see AlertCard.tsx's identical guard). Every other leg,
+        // and every non-IV signal type, uses its own entry_price.
+        const alert = leg.day_trade_alerts
+        const indicesTriggered = alert?.indices_triggered ?? []
+        const representativeSymbol = indicesTriggered.includes('SPY') ? 'SPY' : indicesTriggered[0]
+        const isIV = alert?.ttf_status === 'IV'
+        const isRepresentativeLeg = leg.symbol === representativeSymbol
+        const strikeBasisPrice = isIV && isRepresentativeLeg && alert?.confluence_level != null ? alert.confluence_level : leg.entry_price
 
-        if (!plan.ok) {
-          await supabase.from('trade_executions').update({
-            execution_status: isQuietSkipReason(plan.reason) ? 'skipped_bad_data' : 'needs_manual_review',
-            needs_manual_review: !isQuietSkipReason(plan.reason),
-            review_reason: plan.reason,
+        const suggestion = suggestOptionStrike(direction, strikeBasisPrice, leg.target_50ema_price)
+        const contractType = direction === 'bullish' ? 'call' : 'put'
+        const expirationDate = nyDateKey(new Date())
+
+        const contract = await findOptionContract(leg.symbol, expirationDate, suggestion.entryStrike, contractType)
+        if (!contract) {
+          await supabase.from('option_positions').update({
+            status: 'skipped_bad_data', review_reason: `no ${contractType} contract found for ${leg.symbol} ${expirationDate} near $${suggestion.entryStrike}`,
             account_equity_at_entry: account.equity
-          }).eq('id', executionId)
+          }).eq('id', positionId)
           continue
         }
 
-        const quote = await getQuote(leg.symbol)
-        if (quote?.c && Math.abs(quote.c - leg.entry_price) / leg.entry_price > STALENESS_THRESHOLD_PCT) {
-          await supabase.from('trade_executions').update({
-            execution_status: 'skipped_stale', account_equity_at_entry: account.equity
-          }).eq('id', executionId)
+        const quote = await getOptionQuote(contract.symbol)
+        if (!quote) {
+          await supabase.from('option_positions').update({
+            status: 'needs_manual_review', needs_manual_review: true, review_reason: `no quote for ${contract.symbol}`,
+            account_equity_at_entry: account.equity
+          }).eq('id', positionId)
           continue
         }
 
-        const ids = clientOrderIds(leg.id)
-        const isBullish = direction === 'bullish'
-        const entrySide = isBullish ? 'buy' : 'sell'
-        const exitSide = isBullish ? 'sell' : 'buy'
+        const sizeResult = computeContractCount({
+          accountEquity: account.equity,
+          buyingPower: account.buying_power,
+          riskPct: settingsRow.risk_pct,
+          premiumAsk: quote.ask
+        }, sizeSettings)
+
+        if (!sizeResult.ok) {
+          // insufficient_buying_power at even the 2-contract floor is a normal,
+          // expected outcome on a small account and an expensive premium - a
+          // quiet skip, not a flag. equity_out_of_band/invalid_premium suggest
+          // something is actually wrong upstream.
+          const quiet = sizeResult.reason === 'insufficient_buying_power'
+          await supabase.from('option_positions').update({
+            status: quiet ? 'skipped_bad_data' : 'needs_manual_review',
+            needs_manual_review: !quiet,
+            review_reason: sizeResult.reason,
+            account_equity_at_entry: account.equity,
+            option_symbol: contract.symbol, contract_type: contractType, strike_price: contract.strikePrice, expiration_date: expirationDate
+          }).eq('id', positionId)
+          continue
+        }
+
+        const ids = optionClientOrderIds(leg.id)
 
         let entryOrder
         try {
           entryOrder = await placeOrder({
-            symbol: leg.symbol, qty: plan.qty, side: entrySide, type: 'market', timeInForce: 'day', clientOrderId: ids.entry
+            symbol: contract.symbol, qty: sizeResult.contracts, side: 'buy', type: 'market', timeInForce: 'day', clientOrderId: ids.entry
           })
         } catch (e) {
-          // Buying-power/PDT-style rejections are an expected, handled outcome
-          // for a small account trading higher-priced tickers - not exceptional.
-          await supabase.from('trade_executions').update({
-            execution_status: 'entry_failed', account_equity_at_entry: account.equity, review_reason: String(e)
-          }).eq('id', executionId)
+          await supabase.from('option_positions').update({
+            status: 'entry_failed', account_equity_at_entry: account.equity, review_reason: String(e),
+            option_symbol: contract.symbol, contract_type: contractType, strike_price: contract.strikePrice, expiration_date: expirationDate
+          }).eq('id', positionId)
           continue
         }
 
-        await supabase.from('trade_executions').update({
-          execution_status: 'entry_submitted',
-          qty: plan.qty,
-          account_equity_at_entry: account.equity,
-          entry_order_id: entryOrder.id,
-          entry_client_order_id: ids.entry
-        }).eq('id', executionId)
+        await supabase.from('option_positions').update({
+          status: 'entry_submitted',
+          option_symbol: contract.symbol, contract_type: contractType, strike_price: contract.strikePrice, expiration_date: expirationDate,
+          contracts: sizeResult.contracts, account_equity_at_entry: account.equity, entry_order_id: entryOrder.id
+        }).eq('id', positionId)
 
         let filled = false
+        let fillPrice: number | null = null
         for (let i = 0; i < FILL_POLL_ATTEMPTS; i++) {
           const status = await getOrder(entryOrder.id)
-          if (status?.status === 'filled') { filled = true; break }
+          if (status?.status === 'filled') {
+            filled = true
+            fillPrice = status.filled_avg_price ? parseFloat(status.filled_avg_price) : quote.ask
+            break
+          }
           if (status && ['canceled', 'expired', 'rejected'].includes(status.status)) break
           await sleep(FILL_POLL_INTERVAL_MS)
         }
 
-        if (!filled) {
-          await supabase.from('trade_executions').update({
-            execution_status: 'needs_manual_review', needs_manual_review: true,
+        if (!filled || fillPrice === null) {
+          await supabase.from('option_positions').update({
+            status: 'needs_manual_review', needs_manual_review: true,
             review_reason: 'entry order did not confirm filled within poll window'
-          }).eq('id', executionId)
+          }).eq('id', positionId)
           continue
         }
 
-        await supabase.from('trade_executions').update({ execution_status: 'entry_filled', remaining_qty: plan.qty }).eq('id', executionId)
+        await supabase.from('option_positions').update({
+          status: 'open',
+          premium_entry: fillPrice,
+          remaining_contracts: sizeResult.contracts,
+          stop_pct: settingsRow.hard_stop_pct
+        }).eq('id', positionId)
         entered++
 
-        // Protective orders: a resting native stop for the FULL qty (primary
-        // protection independent of the monitor cron running at all), plus the
-        // scale-out tier limits. Tiers that round to 0 shares are skipped -
-        // see allocateScaleOutQty.
-        const alloc = allocateScaleOutQty(plan.qty)
-        const result = await placeProtectiveOrders(
-          {
-            symbol: leg.symbol,
-            exitSide,
-            qty: plan.qty,
-            stopPrice: plan.stopLossPrice,
-            tierQty: alloc,
-            tierPrices: plan.tierPrices,
-            ids
-          },
-          { stopOrderId: null, tier1OrderId: null, tier2OrderId: null, tier3OrderId: null }
+        const tiers = tierPlanFor(sizeResult.contracts)
+        const { error: tiersError } = await supabase.from('option_position_tiers').insert(
+          tiers.map(t => ({
+            option_position_id: positionId,
+            tier_number: t.tierNumber,
+            is_runner: t.isRunner,
+            target_pct: t.targetPct
+          }))
         )
-
-        await supabase.from('trade_executions').update({
-          execution_status: result.failure ? 'protective_orders_partial' : 'protective_orders_placed',
-          needs_manual_review: !!result.failure,
-          review_reason: result.failure,
-          stop_order_id: result.stopOrderId,
-          stop_client_order_id: ids.stop,
-          tier1_order_id: result.tier1OrderId,
-          tier2_order_id: result.tier2OrderId,
-          tier3_order_id: result.tier3OrderId
-        }).eq('id', executionId)
+        if (tiersError) {
+          await supabase.from('option_positions').update({
+            needs_manual_review: true, review_reason: `entered but tier rows failed to insert: ${tiersError.message}`
+          }).eq('id', positionId)
+        }
       } catch (legError) {
         console.error(`Error executing leg ${leg.id} (${leg.symbol}):`, legError)
-        await supabase.from('trade_executions').update({
-          execution_status: 'needs_manual_review', needs_manual_review: true, review_reason: String(legError)
-        }).eq('id', executionId)
+        await supabase.from('option_positions').update({
+          status: 'needs_manual_review', needs_manual_review: true, review_reason: String(legError)
+        }).eq('id', positionId)
       }
     }
 
