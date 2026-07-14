@@ -212,7 +212,15 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices, occurre
                 </div>
                 <MilestoneLadder leg={leg} />
                 {(() => {
-                  const opt = suggestOptionStrike(isBullish ? 'bullish' : 'bearish', leg.entry_price, leg.target_50ema_price)
+                  // IV's whole thesis is a reversal AT the confluence level (the
+                  // level shown in "Ideal Entry" above), not wherever price
+                  // happens to be by the time the alert fired - basing the
+                  // strike on leg.entry_price instead would pick a strike
+                  // already past the level the reversal is actually pivoting
+                  // on. ORB/TTF/DTF/STF keep using entry_price - "straightforward,
+                  // nearest strike to where price actually is."
+                  const strikeBasisPrice = isIV && alert.confluence_level != null ? alert.confluence_level : leg.entry_price
+                  const opt = suggestOptionStrike(isBullish ? 'bullish' : 'bearish', strikeBasisPrice, leg.target_50ema_price)
                   return (
                     <p className="text-xs text-gray-500 mt-1">
                       Options (computed, not a live quote): <span className="text-white font-bold">{leg.symbol} {opt.entryStrike}{opt.contractType}</span>
