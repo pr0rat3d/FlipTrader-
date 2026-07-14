@@ -32,7 +32,15 @@ interface OpenLeg {
   milestone_10_price: number | null
   milestone_20_price: number | null
   milestone_30_price: number | null
-  day_trade_alerts: { macd_curl: 'bullish' | 'bearish'; confidence: number | null }[] | null
+  // A profit_targets row's day_trade_alert_id is a many-to-one FK (many legs,
+  // one alert) - PostgREST embeds a many-to-one relationship as a single
+  // object, not an array. Confirmed empirically against the live API (2026-
+  // 07-14): a leg.day_trade_alerts?.[0]?.macd_curl read here was silently
+  // undefined on every single leg, forever, since `[0]` indexes into a plain
+  // object rather than an array - the execution bot had never once actually
+  // claimed a trade since it was built, despite legs clearing confidence and
+  // is_enabled being true the whole time.
+  day_trade_alerts: { macd_curl: 'bullish' | 'bearish'; confidence: number | null } | null
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -84,11 +92,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let processed = 0
     let entered = 0
 
-    for (const leg of legs as OpenLeg[]) {
+    // supabase-js's inferred type for this embed says array (it can't statically
+    // know the FK is many-to-one), but the actual runtime shape - confirmed
+    // empirically against the live API - is a single object. Cast through
+    // unknown rather than "fixing" this back to array indexing, which is
+    // exactly the mismatch that caused this bug in the first place.
+    for (const leg of legs as unknown as OpenLeg[]) {
       if (alreadyClaimed.has(leg.id)) continue
 
-      const direction = leg.day_trade_alerts?.[0]?.macd_curl
-      const confidence = leg.day_trade_alerts?.[0]?.confidence ?? 0
+      const direction = leg.day_trade_alerts?.macd_curl
+      const confidence = leg.day_trade_alerts?.confidence ?? 0
       if (!direction) continue
       if (confidence < settingsRow.min_confidence) continue
 
