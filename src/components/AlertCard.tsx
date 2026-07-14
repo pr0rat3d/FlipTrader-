@@ -155,6 +155,24 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices, occurre
             ORB: {alert.orb_breakout_direction === 'bullish' ? 'Bullish' : 'Bearish'} breakout
           </p>
         )}
+        {isORB && (() => {
+          // Pullback level is the OR boundary that just got broken - it's the
+          // level that made this an ORB signal in the first place, now acting
+          // as support (bullish) or resistance (bearish) on a retest.
+          const pullback = isBullish ? alert.orh : alert.orl
+          if (pullback == null) return null
+          const momentumPrice = livePrices?.[legs[0]?.symbol] ?? legs[0]?.entry_price
+          return (
+            <p className="text-yellow-400 font-bold mt-1">
+              Ideal Entry: momentum now{momentumPrice != null && ` (~$${momentumPrice.toFixed(2)})`}, or pullback to ~${pullback.toFixed(2)} (former OR {isBullish ? 'high, now support' : 'low, now resistance'})
+            </p>
+          )
+        })()}
+        {isIV && alert.confluence_level != null && (
+          <p className="text-yellow-400 font-bold mt-1">
+            Ideal Entry: ~${alert.confluence_level.toFixed(2)} (at the {alert.confluence_type} level - don't chase, let it come to you)
+          </p>
+        )}
       </div>
 
       {legs.length > 0 ? (

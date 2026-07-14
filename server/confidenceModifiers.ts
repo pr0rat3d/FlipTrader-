@@ -16,6 +16,17 @@ const CHOP_ZONE_MULTIPLIER = 0.90
 const MIN_CONFIDENCE = 0.3
 const MAX_CONFIDENCE = 0.98
 
+// VIXY (a VIX-futures ETF, not the spot index - see the comment on
+// vixChangePct below for why) moving DOWN on the day is a risk-on read that
+// confirms a bullish trade; moving UP is risk-off and confirms bearish. Same
+// weight class as the pattern/ORB modifiers, not the primary trend gate -
+// this is a supplementary macro-sentiment check, not a hard requirement.
+const VIX_ALIGNED_MULTIPLIER = 1.10
+const VIX_OPPOSED_MULTIPLIER = 0.90
+// Below this, today's VIXY move is treated as noise rather than a real
+// risk-on/risk-off signal - avoids the modifier flipping on trivial chop.
+const VIX_NEUTRAL_THRESHOLD_PCT = 0.3
+
 const MARKET_OPEN_MINUTES = 9 * 60 + 30
 const MARKET_CLOSE_MINUTES = 16 * 60
 const PRIME_TIME_WINDOW_MINUTES = 45
@@ -42,6 +53,15 @@ export interface ConfidenceModifierInputs {
   dailyEma200: number | null
   candlestickDirection: CandlestickDirection | null
   orbBreakoutDirection: 'bullish' | 'bearish' | null
+  // Today's %-change on VIXY (Finnhub's `dp`), a VIX-futures ETF - not the spot
+  // VIX index itself, which isn't available on either data provider's free
+  // tier (checked both: Twelve Data's /indices returns nothing for VIX,
+  // Finnhub's ^VIX requires a paid subscription). VIXY tracks VIX-direction
+  // closely enough for a risk-on/risk-off read. Fetched via Finnhub rather
+  // than Twelve Data specifically so this doesn't compete with the existing
+  // per-minute Twelve Data credit budget (already fully committed between
+  // scan-confluence/scan-day-trades/scan-swings) - Finnhub is a separate quota.
+  vixChangePct: number | null
   now?: Date
 }
 
@@ -67,6 +87,12 @@ export const applyConfidenceModifiers = (baseConfidence: number, inputs: Confide
   if (inputs.orbBreakoutDirection) {
     const aligned = inputs.orbBreakoutDirection === inputs.direction
     confidence *= aligned ? ORB_ALIGNED_MULTIPLIER : ORB_OPPOSED_MULTIPLIER
+  }
+
+  if (inputs.vixChangePct !== null && Math.abs(inputs.vixChangePct) >= VIX_NEUTRAL_THRESHOLD_PCT) {
+    const vixDirection = inputs.vixChangePct < 0 ? 'bullish' : 'bearish'
+    const aligned = vixDirection === inputs.direction
+    confidence *= aligned ? VIX_ALIGNED_MULTIPLIER : VIX_OPPOSED_MULTIPLIER
   }
 
   if (isChopZone(now)) confidence *= CHOP_ZONE_MULTIPLIER

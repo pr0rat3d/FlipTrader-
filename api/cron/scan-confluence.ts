@@ -15,6 +15,12 @@ import { detectIVSignal } from '../../server/signalDetection.js'
 import { detectCandlestickPattern } from '../../server/candlestickPatterns.js'
 import { applyConfidenceModifiers, isPrimeTime } from '../../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, orbTargetPrice } from '../../server/orb.js'
+import { getQuote } from '../../server/finnhub.js'
+
+// VIXY (VIX-futures ETF proxy - see confidenceModifiers.ts) via Finnhub, not
+// Twelve Data - a separate quota from the per-minute credit budget the three
+// confluence indices already fully commit between them.
+const VIX_PROXY_SYMBOL = 'VIXY'
 
 // Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
 // day-trading default, not load-bearing anywhere downstream, easy to tune.
@@ -77,6 +83,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!shouldRunThisMinute(new Date())) {
       return res.status(200).json({ success: true, skipped: true, reason: 'throttled (off-cadence minute outside prime time)' })
     }
+
+    // Fetched once per run (not per signal type/direction) and reused everywhere
+    // below - a null here (quote fetch failed) just means the VIX modifier sits
+    // out this run, same as a null daily-trend EMA already does elsewhere.
+    const vixQuote = await getQuote(VIX_PROXY_SYMBOL)
+    const vixChangePct: number | null = vixQuote?.dp ?? null
 
     // One entry per scanned symbol regardless of whether the full signal condition is
     // met - analyzeCandles always computes rsiDivergence/macdCurl/entryPrice/
@@ -141,6 +153,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         dailyEma200: dailyLevels?.dailyEma200 ?? null,
         candlestickDirection: patternMatch?.direction ?? null,
         orbBreakoutDirection: orbDirection,
+        vixChangePct,
         now: entryTime
       })
 
@@ -229,6 +242,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           dailyEma200: levels.dailyEma200,
           candlestickDirection: patternMatch?.direction ?? null,
           orbBreakoutDirection: orbDirection,
+          vixChangePct,
           now: entryTime
         })
 
@@ -318,7 +332,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // Trend and ORB-direction are deliberately NOT passed here - trend
         // alignment is already a hard requirement to reach this point, and
         // re-applying the ORB modifier to the ORB signal itself would just be
-        // circular multiplication by a constant, not real information.
+        // circular multiplication by a constant, not real information. VIX IS
+        // passed - unlike those two, it isn't derived from ORB's own detection
+        // logic, so it's real independent information here too.
         const patternMatch = detectCandlestickPattern(representative.candles)
         const confidence = applyConfidenceModifiers(orbBaseConfidence(qualifyingSymbols.length), {
           direction,
@@ -326,6 +342,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           dailyEma200: null,
           candlestickDirection: patternMatch?.direction ?? null,
           orbBreakoutDirection: null,
+          vixChangePct,
           now: entryTime
         })
 
