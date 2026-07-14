@@ -15,27 +15,48 @@ interface AlertGroup {
   firstSeenAt: string
 }
 
-const alertGroupKey = (alert: Alert): string => {
-  const direction = alert.macd_curl ?? alert.rsi_divergence ?? 'unknown'
+// A "slot" is type+symbols only (no direction) - the dashboard real estate
+// for e.g. "IV Momentum Entry: SPY/QQQ" should show ONE current read, not a
+// bullish card and a bearish card sitting side by side when the underlying
+// condition has flipped direction mid-session.
+const slotKey = (alert: Alert): string => {
   const indices = [...alert.indices_triggered].sort().join(',')
-  return `${alert.ttf_status}:${indices}:${direction}`
+  return `${alert.ttf_status}:${indices}`
 }
 
-// Repeated alerts for the same setup (same type/symbols/direction) collapse into
-// one card instead of stacking a new one every scan cycle - ORB/IV can keep
-// re-firing every 1-3 min for as long as the underlying condition holds (same
-// idea as the candlestick-pattern-run consolidation on the Indicators page).
-// The card shown is whichever occurrence has the HIGHEST confidence seen so far
-// in that streak, not just the most recent - a fresh higher-confidence re-fire
-// is real new evidence (entry/stop have likely moved too), so it should visibly
-// replace a weaker prior read rather than get silently outranked by a more
-// recent but weaker occurrence. What's displayed never trends back down.
+const alertDirection = (alert: Alert): string => alert.macd_curl ?? alert.rsi_divergence ?? 'unknown'
+
+// Repeated alerts for the same setup collapse into one card instead of
+// stacking a new one every scan cycle - ORB/IV can keep re-firing every 1-3
+// min for as long as the underlying condition holds (same idea as the
+// candlestick-pattern-run consolidation on the Indicators page).
+//
+// Two passes: first, find each slot's CURRENT direction (whichever direction
+// its most recent alert fired in). Second, fold in only alerts matching that
+// current direction - a stale opposite-direction alert (superseded by a
+// fresher flip, e.g. bearish IV SPY/QQQ earlier, bullish IV SPY/QQQ now) is
+// dropped entirely rather than shown as a second, contradictory card for the
+// same slot.
+//
+// Within the surviving direction, the card shown is whichever occurrence has
+// the HIGHEST confidence seen so far in that streak, not just the most
+// recent - a fresh higher-confidence re-fire is real new evidence (entry/stop
+// have likely moved too), so it should visibly replace a weaker prior read
+// rather than get silently outranked by a more recent but weaker occurrence.
 const groupAlerts = (alerts: Alert[]): AlertGroup[] => {
+  const currentDirection = new Map<string, string>()
+  for (const alert of alerts) {
+    const key = slotKey(alert)
+    if (!currentDirection.has(key)) currentDirection.set(key, alertDirection(alert))
+  }
+
   const groups = new Map<string, AlertGroup>()
   const order: string[] = []
 
   for (const alert of alerts) {
-    const key = alertGroupKey(alert)
+    const key = slotKey(alert)
+    if (alertDirection(alert) !== currentDirection.get(key)) continue
+
     const existing = groups.get(key)
     if (!existing) {
       groups.set(key, { key, representative: alert, count: 1, firstSeenAt: alert.timestamp })
