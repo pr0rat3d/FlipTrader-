@@ -61,6 +61,31 @@ const closeOpposingPositions = async (newDirection: 'bullish' | 'bearish'): Prom
   return closed
 }
 
+// Same-symbol+direction re-entry after a prior position in that direction
+// already closed today requires proof the move actually paused first - the
+// MACD histogram must have crossed back through zero at some point since the
+// close, not just still be the same continuous trend the 30-bar rolling
+// lookback (scan-confluence.ts) keeps calling "bullish"/"bearish" scan after
+// scan. Without this, IV/ORB's own re-fire-every-few-minutes behavior (see
+// the strike-selection comment below) would let the bot re-enter the
+// identical move repeatedly with no new information behind it. Reads
+// indicator_snapshots rather than profit_targets/day_trade_alerts because
+// those only get a row when a signal condition already fires - the snapshot
+// table is written every scan-confluence run regardless, so it's the only
+// place with a continuous histogram history to detect a reset against.
+const hasMomentumReset = async (symbol: string, direction: 'bullish' | 'bearish', sinceIso: string): Promise<boolean> => {
+  const { data, error } = await supabase
+    .from('indicator_snapshots')
+    .select('macd_histogram')
+    .eq('symbol', symbol)
+    .eq('category', 'day_trade')
+    .gt('timestamp', sinceIso)
+    .not('macd_histogram', 'is', null)
+  if (error) throw error
+  if (!data || data.length === 0) return false
+  return direction === 'bullish' ? data.some(r => r.macd_histogram <= 0) : data.some(r => r.macd_histogram >= 0)
+}
+
 interface OpenLeg {
   id: string
   symbol: string
@@ -187,6 +212,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         .limit(1)
       if (sameDirectionError) throw sameDirectionError
       if (sameDirectionOpen && sameDirectionOpen.length > 0) continue
+
+      // A prior same-symbol+direction position that already closed TODAY
+      // (any resolution) still guards re-entry until momentum actually
+      // resets - see hasMomentumReset above. Only today's close matters; a
+      // resolved position from a prior session has no bearing on a fresh
+      // session's first move.
+      const { data: lastClosedRows, error: lastClosedError } = await supabase
+        .from('option_positions')
+        .select('closed_at')
+        .eq('underlying_symbol', leg.symbol)
+        .eq('direction', direction)
+        .not('closed_at', 'is', null)
+        .order('closed_at', { ascending: false })
+        .limit(1)
+      if (lastClosedError) throw lastClosedError
+      const lastClosedAt = lastClosedRows?.[0]?.closed_at
+      if (lastClosedAt && nyDateKey(lastClosedAt) === today) {
+        const reset = await hasMomentumReset(leg.symbol, direction, lastClosedAt)
+        if (!reset) continue
+      }
 
       // This leg has cleared every entry gate - if that means the bot is
       // about to act on a signal opposite to something already open (any
