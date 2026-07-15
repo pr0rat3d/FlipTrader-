@@ -159,19 +159,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           continue
         }
 
-        // IV's thesis is a reversal AT the confluence level - only the
-        // representative symbol's confluence_level is meaningful (it's
-        // computed from ONE symbol's candles and stored once per alert, not
-        // per leg - see AlertCard.tsx's identical guard). Every other leg,
-        // and every non-IV signal type, uses its own entry_price.
-        const alert = leg.day_trade_alerts
-        const indicesTriggered = alert?.indices_triggered ?? []
-        const representativeSymbol = indicesTriggered.includes('SPY') ? 'SPY' : indicesTriggered[0]
-        const isIV = alert?.ttf_status === 'IV'
-        const isRepresentativeLeg = leg.symbol === representativeSymbol
-        const strikeBasisPrice = isIV && isRepresentativeLeg && alert?.confluence_level != null ? alert.confluence_level : leg.entry_price
-
-        const suggestion = suggestOptionStrike(direction, strikeBasisPrice, leg.target_50ema_price)
+        // Always entry_price, never confluence_level, here. confluence_level
+        // is where IV's reversal ORIGINALLY triggered (a fixed, mostly-static
+        // reference like PDH that doesn't move intraday) - fine as manual-
+        // trading guidance ("don't chase, let it come to you" - AlertCard's
+        // Ideal Entry line), but IV re-fires every few minutes for as long as
+        // the setup holds, and the bot enters at whatever entry_price the
+        // FIRST re-fire that clears min_confidence happens to have - which
+        // can be well after the level was first tested. Found live 2026-07-15:
+        // a SPY IV bearish alert fired at entry_price $750.27, ~$4.59 already
+        // below its confluence_level of $754.86 (that day's PDH) by the time
+        // it cleared 0.7 confidence - using confluence_level as the strike
+        // basis bought a 755 put (deep ITM relative to the ACTUAL $750.27
+        // entry) instead of a strike anywhere near where the position
+        // actually opened.
+        const suggestion = suggestOptionStrike(direction, leg.entry_price, leg.target_50ema_price)
         const contractType = direction === 'bullish' ? 'call' : 'put'
         const expirationDate = nyDateKey(new Date())
 

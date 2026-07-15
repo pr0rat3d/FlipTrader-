@@ -14,7 +14,7 @@ import { getSupportResistanceLevels, getDailyLevels, calculateOpeningRange } fro
 import { detectIVSignal } from '../../server/signalDetection.js'
 import { detectCandlestickPattern } from '../../server/candlestickPatterns.js'
 import { applyConfidenceModifiers, isPrimeTime } from '../../server/confidenceModifiers.js'
-import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, orbTargetPrice } from '../../server/orb.js'
+import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, continuationTargetPrice } from '../../server/orb.js'
 import { getQuote } from '../../server/finnhub.js'
 
 // VIXY (VIX-futures ETF proxy - see confidenceModifiers.ts) via Finnhub, not
@@ -259,6 +259,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           now: entryTime
         })
 
+        // IV's thesis is "reject off this level and continue," not reversion
+        // to the 50 EMA (which the field name misleadingly suggests) - see
+        // continuationTargetPrice's comment for why the raw 50 EMA broke
+        // both stop-hit detection and (formerly) the shares-model's
+        // scale-out orders, found live 2026-07-15 on 72 of that day's 99 IV
+        // legs.
+        const representativeStop = stopLossFor(direction, representative.entryPrice, representative.atr)
+
         const { data, error } = await supabase
           .from('day_trade_alerts')
           .insert({
@@ -269,7 +277,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             indices_triggered: ivIndices,
             entry_price: representative.entryPrice,
             entry_time: entryTime,
-            target_50ema: representative.target50EMA,
+            target_50ema: continuationTargetPrice(direction, representative.entryPrice, representativeStop),
             confluence_type: ivResult.confluenceType,
             confluence_level: ivResult.confluenceLevel,
             confidence,
@@ -280,7 +288,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             orl: levels.orl,
             gap_up: levels.gapUp,
             gap_down: levels.gapDown,
-            stop_loss_price: stopLossFor(direction, representative.entryPrice, representative.atr),
+            stop_loss_price: representativeStop,
             orb_breakout_direction: orbDirection,
             timestamp: entryTime
           })
@@ -291,14 +299,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (data && data[0]) {
           await supabase.from('profit_targets').insert(
             directional.map(s => {
-              const milestones = deriveMilestonePrices(s.entryPrice, s.target50EMA)
+              const legStop = stopLossFor(direction, s.entryPrice, s.atr)
+              const legTarget = continuationTargetPrice(direction, s.entryPrice, legStop)
+              const milestones = deriveMilestonePrices(s.entryPrice, legTarget)
               return {
                 day_trade_alert_id: data[0].id,
                 symbol: s.symbol,
                 entry_price: s.entryPrice,
                 entry_time: entryTime,
-                target_50ema_price: s.target50EMA,
-                stop_loss_price: stopLossFor(direction, s.entryPrice, s.atr),
+                target_50ema_price: legTarget,
+                stop_loss_price: legStop,
                 milestone_10_price: milestones.milestone10,
                 milestone_20_price: milestones.milestone20,
                 milestone_30_price: milestones.milestone30
@@ -371,7 +381,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             indices_triggered: qualifyingSymbols,
             entry_price: representative.entryPrice,
             entry_time: entryTime,
-            target_50ema: orbTargetPrice(direction, representative.entryPrice, representativeStop),
+            target_50ema: continuationTargetPrice(direction, representative.entryPrice, representativeStop),
             confidence,
             orh: openingRange?.orh ?? null,
             orl: openingRange?.orl ?? null,
@@ -387,7 +397,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           await supabase.from('profit_targets').insert(
             candidates.map(s => {
               const legStop = stopLossFor(direction, s.entryPrice, s.atr)
-              const legTarget = orbTargetPrice(direction, s.entryPrice, legStop)
+              const legTarget = continuationTargetPrice(direction, s.entryPrice, legStop)
               const milestones = deriveMilestonePrices(s.entryPrice, legTarget)
               return {
                 day_trade_alert_id: data[0].id,

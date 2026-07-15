@@ -49,8 +49,20 @@ export interface PriceSampleUpdate {
 // returning only the fields that changed (or null if nothing new happened). Used by
 // both the live per-minute tracker (real quotes) and retrospective replay (historical
 // indicator_snapshots closes) - same function, so the two paths can't drift apart.
-export const applyPriceSample = (row: ProfitTargetRow, price: number, at: Date): PriceSampleUpdate | null => {
-  const isBullish = row.target_50ema_price > row.entry_price
+//
+// `direction` is the alert's own real direction (macd_curl/rsi_divergence) - this
+// used to be INFERRED as `target_50ema_price > entry_price`, which quietly assumed
+// the target is always on the correct side of entry. Found broken live 2026-07-15:
+// IV's target_50ema_price was on the wrong side of entry for 72 of 99 legs that
+// day (see continuationTargetPrice in orb.ts for the root cause and fix), which
+// made this inference say "bullish" for genuinely bearish trades - the correctly-
+// computed bearish stop (above entry) then looked like an already-crossed bullish
+// stop, false-flagging legs as stopped_out within a fraction of a second of
+// creation. Taking direction as an explicit parameter means a future signal type
+// with the same kind of target-math bug can't silently break stop-hit detection
+// this same way again.
+export const applyPriceSample = (row: ProfitTargetRow, direction: 'bullish' | 'bearish', price: number, at: Date): PriceSampleUpdate | null => {
+  const isBullish = direction === 'bullish'
   const distance = Math.abs(row.target_50ema_price - row.entry_price)
   const update: PriceSampleUpdate = {}
   const atISO = at.toISOString()

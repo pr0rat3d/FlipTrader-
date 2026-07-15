@@ -22,10 +22,20 @@ export const config = {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
+interface OpenTarget {
+  id: string
+  symbol: string
+  entry_time: string
+  // Many-to-one FK embeds as a single object in PostgREST, not an array -
+  // see execute-alerts.ts's git history (2026-07-14) for the empirically-
+  // confirmed reasoning.
+  day_trade_alerts: { macd_curl: 'bullish' | 'bearish' | null; rsi_divergence: 'bullish' | 'bearish' | null } | null
+}
+
 const checkOpenTargets = async (): Promise<{ hit: number; expired: number; stoppedOut: number }> => {
   const { data: targets, error } = await supabase
     .from('profit_targets')
-    .select('*')
+    .select('*, day_trade_alerts(macd_curl, rsi_divergence)')
     .eq('status', 'open')
 
   if (error) throw error
@@ -36,7 +46,7 @@ const checkOpenTargets = async (): Promise<{ hit: number; expired: number; stopp
   let stoppedOut = 0
   const now = new Date()
 
-  for (const target of targets) {
+  for (const target of targets as unknown as OpenTarget[]) {
     // Cheap check first - no API call needed to close out a stale row from a
     // session that's already ended.
     if (checkExpiry(new Date(target.entry_time), now)) {
@@ -45,10 +55,17 @@ const checkOpenTargets = async (): Promise<{ hit: number; expired: number; stopp
       continue
     }
 
+    // The real signal direction, not inferred from target-vs-entry (see
+    // applyPriceSample for why that inference broke). Missing/malformed
+    // direction data is an upstream data problem, not something to guess
+    // through - skip rather than risk checking against the wrong side.
+    const direction = target.day_trade_alerts?.macd_curl ?? target.day_trade_alerts?.rsi_divergence
+    if (!direction) continue
+
     const quote = await getQuote(target.symbol)
     if (!quote || !quote.c) continue
 
-    const update = applyPriceSample(target, quote.c, now)
+    const update = applyPriceSample(target as any, direction, quote.c, now)
     if (update) {
       await supabase.from('profit_targets').update(update).eq('id', target.id)
       if (update.status === 'target_hit') hit++

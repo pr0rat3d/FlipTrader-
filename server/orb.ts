@@ -65,23 +65,38 @@ export const orbBaseConfidence = (qualifyingCount: number): number => {
   return 0.55
 }
 
-// ORB is a continuation strategy - it needs a target further along in the
-// breakout direction, NOT the 50 EMA reversion target TTF/DTF/STF/IV use.
-// The 50 EMA is a lagging average that's frequently BEHIND price on exactly
-// the trend days ORB is designed to fire on ("especially on supertrend
-// days") - price has already run beyond it before the breakout even
-// happens. Using it here silently produced a "target" behind entry for a
-// live-fired alert (SPY, 2026-07-14: entry $751.61, 50EMA $751.00 - a
-// bullish trade "targeting" a lower price), which fed backwards 10/20/30%
-// milestones into the execution bot's scale-out limit orders - a sell limit
-// below entry on a long fills almost immediately, dumping the position
-// right after entry instead of scaling out on strength. A fixed R-multiple
-// of the same ATR-based stop distance is used instead: symmetric with the
-// R:R already shown in the UI, and guaranteed to land on the correct side
-// of entry by construction.
-const ORB_TARGET_R_MULTIPLE = 2
+// ORB and IV are both continuation/rejection plays - they need a target
+// further along in the signal's OWN direction, NOT the 50 EMA reversion
+// target that only makes sense for TTF/DTF/STF's genuine RSI-divergence
+// mean-reversion thesis. The 50 EMA is a lagging average with no natural
+// reason to sit on the correct side of entry for either of these: it's
+// frequently BEHIND price on the trend days ORB is designed to fire on
+// ("especially on supertrend days"), and IV's "reject off a level and
+// continue" thesis (confluence_type e.g. pdh_rejection) isn't a reversion
+// play either despite the field being named target_50ema.
+//
+// Found live for ORB first (2026-07-14: SPY entry $751.61, 50EMA target
+// $751.00 - a bullish trade "targeting" a lower price), fixed there, but
+// the same bug was still live for IV - confirmed empirically 2026-07-15:
+// 72 of 99 of that day's IV legs had target_50ema_price on the wrong side
+// of entry. This was worse than cosmetic: profit_targets' own stop-hit
+// tracking (applyPriceSample) infers trade direction by comparing
+// target_50ema_price to entry_price (no direction column to check
+// instead), so a wrong-side target made it think a bearish trade was
+// bullish - the correctly-computed bearish stop (above entry) then looked
+// like an already-crossed bullish stop, and legs were false-flagged
+// stopped_out within fractions of a second of being created. It also fed
+// the options bot's strike selection a stale confluence_level with no
+// target-side guard, and backwards 10/20/30% milestones into the old
+// shares-model's scale-out limit orders (same failure mode as ORB's
+// original bug) before that model was replaced.
+//
+// A fixed R-multiple of the same ATR-based stop distance is used instead
+// for both ORB and IV: symmetric with the R:R already shown in the UI, and
+// guaranteed to land on the correct side of entry by construction.
+const CONTINUATION_TARGET_R_MULTIPLE = 2
 
-export const orbTargetPrice = (
+export const continuationTargetPrice = (
   direction: 'bullish' | 'bearish',
   entryPrice: number,
   stopLossPrice: number | null
@@ -89,6 +104,6 @@ export const orbTargetPrice = (
   if (stopLossPrice === null) return entryPrice
   const riskPerShare = Math.abs(entryPrice - stopLossPrice)
   return direction === 'bullish'
-    ? entryPrice + ORB_TARGET_R_MULTIPLE * riskPerShare
-    : entryPrice - ORB_TARGET_R_MULTIPLE * riskPerShare
+    ? entryPrice + CONTINUATION_TARGET_R_MULTIPLE * riskPerShare
+    : entryPrice - CONTINUATION_TARGET_R_MULTIPLE * riskPerShare
 }
