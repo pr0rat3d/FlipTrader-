@@ -30,6 +30,22 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // reset gate below, not a general confidence floor.
 const ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD = 0.85
 
+// A profit_targets leg stays status='open' (and so eligible here) for as
+// long as the underlying hasn't technically touched its own ATR-based
+// stop_loss_price - a much wider band than how fast an option premium
+// actually moves. A leg that couldn't execute earlier (buying power, the
+// same-symbol dedup) just sits in that backlog, unconnected to current
+// conditions, until something clears - found live 2026-07-15: three IV
+// bullish legs from 1:36-1:42pm ET sat blocked behind other open same-
+// symbol positions, then executed at 2:51pm the moment those positions
+// closed, buying the exact top of a reversal that had already fully played
+// out an hour earlier. If a leg is still unclaimed after this many minutes,
+// either it was blocked (and a live setup would very likely have re-fired a
+// fresh identical signal well within this window anyway, since IV re-fires
+// every ~3 min) or the setup has simply moved on - either way, too old to
+// act on now.
+const LEG_STALENESS_CUTOFF_MINUTES = 5
+
 // A fresh signal clearing every entry gate (confidence, IV timing, etc.) in
 // the OPPOSITE direction from a currently open position means the thesis it
 // was bought on has flipped - flatten everything open (any symbol, not just
@@ -193,6 +209,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const leg of legs as unknown as OpenLeg[]) {
       if (entriesToday >= settingsRow.max_daily_entries) break
       if (alreadyClaimed.has(leg.id)) continue
+
+      const legAgeMinutes = (Date.now() - new Date(leg.entry_time).getTime()) / 60_000
+      if (legAgeMinutes > LEG_STALENESS_CUTOFF_MINUTES) continue
 
       const direction = leg.day_trade_alerts?.macd_curl
       const confidence = leg.day_trade_alerts?.confidence ?? 0
