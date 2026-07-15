@@ -11,9 +11,10 @@ export interface Alert {
   id: string;
   symbol: string;
   // 'IV' is the earlier momentum-only signal (MACD curl + support/resistance
-  // confluence, no RSI divergence) - fires before TTF/DTF/STF's full confirmation.
+  // confluence, no RSI divergence) - fires before TTTF/DTTF/STTF's full confirmation.
   // 'ORB' is opening-range-breakout continuation, hard-gated on daily trend.
-  ttf_status: 'TTF' | 'DTF' | 'STF' | 'IV' | 'ORB';
+  // TTTF/DTTF/STTF = Triple/Double/Single-index Triple Time Frame.
+  ttf_status: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB';
   rsi_divergence: 'bullish' | 'bearish' | null; // null for IV alerts
   macd_curl: 'bullish' | 'bearish';
   indices_triggered: string[];

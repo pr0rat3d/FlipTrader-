@@ -7,7 +7,7 @@ import { recordSnapshot } from '../../server/snapshot.js'
 import { calculateSessionVWAP } from '../../server/vwap.js'
 import { pickBatch } from '../../server/batching.js'
 
-// TTF/DTF/STF/IV confluence detection moved to scan-confluence.ts, which runs on
+// TTTF/DTTF/STTF/IV confluence detection moved to scan-confluence.ts, which runs on
 // its own faster (every 1 min) schedule - that logic is latency-sensitive, this
 // one isn't (followed-ticker chart history doesn't need to be faster than 5 min).
 // Keeping this file/endpoint name so the existing cron-job.org job needs no URL

@@ -1,11 +1,11 @@
 # FlipTrader
 
-Real-time day trading and swing trading alert app with TTF/DTF/STF signal tiering.
+Real-time day trading and swing trading alert app with TTTF/DTTF/STTF signal tiering.
 
 ## Features
 
 - **Day Trading Alerts**: SPY/QQQ/IWM reversal detection via RSI divergence + MACD curl
-- **Tiered Alerts**: TTF (all 3 indices), DTF (2 indices), STF (1 index)
+- **Tiered Alerts**: TTTF (all 3 indices), DTTF (2 indices), STTF (1 index)
 - **Profit Targets**: Automatic 50 EMA tracking and notification when target hit
 - **Swing Trading**: Daily RSI < 30 oversold detection with sector filtering
 - **Real-time Updates**: Supabase subscriptions for instant alert delivery

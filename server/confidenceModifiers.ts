@@ -2,7 +2,7 @@ import { nyMinutesSinceMidnight } from './rvol.js'
 import { CandlestickDirection } from './candlestickPatterns.js'
 
 // All tunable, none load-bearing - these adjust the base tier/type confidence
-// already computed (0.55-0.95 for TTF/DTF/STF, 0.585-0.85 for IV), they don't
+// already computed (0.55-0.95 for TTTF/DTTF/STTF, 0.585-0.85 for IV), they don't
 // replace it. Final result is clamped so a modifier can't push a weak signal
 // above a strong one's floor, or crush a strong signal to near-zero.
 const TREND_ALIGNED_MULTIPLIER = 1.15

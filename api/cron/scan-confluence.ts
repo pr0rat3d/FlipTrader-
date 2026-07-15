@@ -35,7 +35,7 @@ const MACD_CURL_LOOKBACK_BARS = 30
 // day-trading default, not load-bearing anywhere downstream, easy to tune.
 const ATR_STOP_MULTIPLIER = 1.5
 
-// Split out from scan-day-trades.ts so the latency-sensitive TTF/DTF/STF/IV
+// Split out from scan-day-trades.ts so the latency-sensitive TTTF/DTTF/STTF/IV
 // detection can run on its own fast schedule (every 1 min - 3 credits/min, well
 // under Twelve Data's free-tier 8 credits/min cap) without being tied to the
 // slower cadence that's actually fine for followed-ticker snapshot history
@@ -140,17 +140,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // Full confluence (TTF/DTF/STF): RSI divergence + MACD curl agreeing.
+    // Full confluence (TTTF/DTTF/STTF): RSI divergence + MACD curl agreeing.
     const signalResults = perSymbolSignals.filter(s => s.rsiDivergence && s.rsiDivergence === s.macdCurl)
     const triggeredIndices = signalResults.map(r => r.symbol)
     let fullConfluenceFired = false
 
     if (signalResults.length > 0) {
       fullConfluenceFired = true
-      const ttfStatus = triggeredIndices.length === 3 ? 'TTF' : triggeredIndices.length === 2 ? 'DTF' : 'STF'
+      const ttfStatus = triggeredIndices.length === 3 ? 'TTTF' : triggeredIndices.length === 2 ? 'DTTF' : 'STTF'
       // Same confidence scale the user's original spec proposed for full confluence -
       // scales with how many indices agree, same idea as IV's index-count scaling.
-      const baseConfidence = ttfStatus === 'TTF' ? 0.95 : ttfStatus === 'DTF' ? 0.75 : 0.55
+      const baseConfidence = ttfStatus === 'TTTF' ? 0.95 : ttfStatus === 'DTTF' ? 0.75 : 0.55
       const representative = signalResults[0]
       const entryTime = new Date()
 

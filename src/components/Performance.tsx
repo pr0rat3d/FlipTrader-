@@ -4,10 +4,10 @@ import { getTierColor, getTierLabel } from '../lib/alerts'
 import { Alert, ProfitTarget } from '../types'
 import { fmt, timeLabel } from './charts/ChartPrimitives'
 
-const TIERS: Array<'TTF' | 'DTF' | 'STF' | 'IV' | 'ORB'> = ['TTF', 'DTF', 'STF', 'IV', 'ORB']
+const TIERS: Array<'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB'> = ['TTTF', 'DTTF', 'STTF', 'IV', 'ORB']
 
 interface TierStats {
-  tier: 'TTF' | 'DTF' | 'STF' | 'IV' | 'ORB'
+  tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB'
   totalLegs: number
   resolvedLegs: number
   targetHit: number
@@ -20,7 +20,7 @@ interface TierStats {
   avgMaxFavorablePct: number | null
 }
 
-const computeTierStats = (tier: 'TTF' | 'DTF' | 'STF' | 'IV' | 'ORB', legs: ProfitTarget[]): TierStats => {
+const computeTierStats = (tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB', legs: ProfitTarget[]): TierStats => {
   const totalLegs = legs.length
   const targetHit = legs.filter(l => l.status === 'target_hit').length
   const expired = legs.filter(l => l.status === 'expired').length
@@ -231,7 +231,7 @@ export const Performance: React.FC = () => {
   }, [])
 
   const alertTierById = useMemo(() => {
-    const map = new Map<string, 'TTF' | 'DTF' | 'STF' | 'IV' | 'ORB'>()
+    const map = new Map<string, 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB'>()
     for (const alert of alerts) map.set(alert.id, alert.ttf_status)
     return map
   }, [alerts])
@@ -253,7 +253,7 @@ export const Performance: React.FC = () => {
 
   // Does the a-priori confidence score (computed at signal time) actually predict
   // real outcomes? Buckets every resolved/open leg by its alert's confidence,
-  // independent of tier - a high-confidence STF and a high-confidence TTF land in
+  // independent of tier - a high-confidence STTF and a high-confidence TTTF land in
   // the same bucket here.
   const confidenceBucketStats = useMemo(() => {
     const legsWithConfidence = profitTargets.filter(pt => alertConfidenceById.has(pt.day_trade_alert_id))
@@ -272,7 +272,7 @@ export const Performance: React.FC = () => {
     <div className="p-4">
       <h2 className="text-2xl font-bold text-white mb-2">Performance</h2>
       <p className="text-xs text-gray-400 mb-4">
-        Did the TTF/DTF/STF reversal signals actually pay off? Milestones are % of the
+        Did the TTTF/DTTF/STTF reversal signals actually pay off? Milestones are % of the
         price distance from entry to the 50 EMA target (10/20/30%), with the full target
         as the "50 tap." Live tracking uses real-time quotes; historical replay uses
         5-minute close-only snapshots, so it may understate the true peak favorable move.
@@ -283,7 +283,7 @@ export const Performance: React.FC = () => {
       {!loading && profitTargets.length === 0 && (
         <p className="text-gray-400">
           No signals have fired yet, so there's nothing to analyze. This fills in
-          automatically as real TTF/DTF/STF alerts occur.
+          automatically as real TTTF/DTTF/STTF alerts occur.
         </p>
       )}
 

@@ -56,8 +56,8 @@ export const isDailyTrendAligned = (
   return (direction === 'bullish') === dailyTrendBullish
 }
 
-// Mirrors TTF/DTF/STF and IV's existing index-count-scaling convention - a
-// starting point between IV's tiers and full TTF, adjustable once real data
+// Mirrors TTTF/DTTF/STTF and IV's existing index-count-scaling convention - a
+// starting point between IV's tiers and full TTTF, adjustable once real data
 // comes in via the Confidence Calibration page.
 export const orbBaseConfidence = (qualifyingCount: number): number => {
   if (qualifyingCount >= 3) return 0.80
@@ -67,7 +67,7 @@ export const orbBaseConfidence = (qualifyingCount: number): number => {
 
 // ORB and IV are both continuation/rejection plays - they need a target
 // further along in the signal's OWN direction, NOT the 50 EMA reversion
-// target that only makes sense for TTF/DTF/STF's genuine RSI-divergence
+// target that only makes sense for TTTF/DTTF/STTF's genuine RSI-divergence
 // mean-reversion thesis. The 50 EMA is a lagging average with no natural
 // reason to sit on the correct side of entry for either of these: it's
 // frequently BEHIND price on the trend days ORB is designed to fire on

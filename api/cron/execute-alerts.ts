@@ -21,6 +21,15 @@ const FILL_POLL_ATTEMPTS = 8
 const FILL_POLL_INTERVAL_MS = 1000
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
+// A high-confidence ORB continuation on a supertrend day (up all day, down
+// all day, little-to-no reversal) can legitimately keep re-firing on the
+// same symbol+direction without ever getting a histogram reset - the trend
+// just doesn't pull back. Distinct from min_confidence (which gates whether
+// ANY entry happens at all, and is tuned separately/lower) - this is a
+// deliberately higher bar for the specific case of overriding the momentum-
+// reset gate below, not a general confidence floor.
+const ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD = 0.85
+
 // A fresh signal clearing every entry gate (confidence, IV timing, etc.) in
 // the OPPOSITE direction from a currently open position means the thesis it
 // was bought on has flipped - flatten everything open (any symbol, not just
@@ -220,15 +229,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // session's first move. IV and ORB are exactly the repetitive-re-fire
       // case this gate targets (re-firing every few minutes off the same
       // static level/breakout with no new price structure behind it) - but
-      // TTF/DTF/STF is exempt, since RSI divergence requires a genuinely NEW
-      // price extreme with RSI failing to confirm it (detectRSIDivergence)
+      // TTTF/DTTF/STTF is exempt, since RSI divergence requires a genuinely
+      // NEW price extreme with RSI failing to confirm it (detectRSIDivergence)
       // to fire at all. A second full-confluence signal later in the day
       // already IS the proof of a fresh pullback-and-turn; gating it on the
       // histogram too would risk blocking a legitimate high-confidence
       // re-entry during a strong, persistently one-sided trend day where the
       // histogram simply never dips back through zero.
+      //
+      // ORB gets a second, narrower exemption on top of that: a high-
+      // confidence (>=85%) continuation is allowed to bypass the reset gate
+      // too - the exact supertrend-day case (up all day, down all day, no
+      // real reversal) where waiting for a histogram flatten could mean
+      // never re-entering a trend that's still very much intact. IV keeps no
+      // such exemption at any confidence - it's a reversal-at-a-level thesis,
+      // and re-firing at the same static level without a real change is
+      // still noise no matter how high the number reads.
       const ttfStatus = leg.day_trade_alerts?.ttf_status
-      if (ttfStatus === 'IV' || ttfStatus === 'ORB') {
+      const orbHighConfidenceContinuation = ttfStatus === 'ORB' && confidence >= ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD
+      if ((ttfStatus === 'IV' || ttfStatus === 'ORB') && !orbHighConfidenceContinuation) {
         const { data: lastClosedRows, error: lastClosedError } = await supabase
           .from('option_positions')
           .select('closed_at')

@@ -74,7 +74,7 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices, occurre
   const isORB = alert.ttf_status === 'ORB'
 
   // day_trade_alerts.entry_price/target_50ema are a single blended number even for a
-  // DTF/TTF alert (2-3 symbols) - blending an ~$600 SPY price with an ~$220 IWM price
+  // DTTF/TTTF alert (2-3 symbols) - blending an ~$600 SPY price with an ~$220 IWM price
   // was never meaningful. profit_targets now has one row per triggered symbol with
   // its own real entry/target, so fetch those for an accurate per-symbol breakdown.
   const [legs, setLegs] = useState<ProfitTarget[]>([])
@@ -217,7 +217,7 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices, occurre
                   // happens to be by the time the alert fired - basing the
                   // strike on leg.entry_price instead would pick a strike
                   // already past the level the reversal is actually pivoting
-                  // on. ORB/TTF/DTF/STF keep using entry_price - "straightforward,
+                  // on. ORB/TTTF/DTTF/STTF keep using entry_price - "straightforward,
                   // nearest strike to where price actually is."
                   //
                   // confluence_level is computed from ONE representative symbol
@@ -227,7 +227,7 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, livePrices, occurre
                   // nonsense strike (e.g. "753 P" on a stock trading at $720).
                   // Only the representative leg gets the confluence-level basis;
                   // every other leg in the same multi-symbol alert falls back to
-                  // its own entry_price, same as ORB/TTF/DTF/STF.
+                  // its own entry_price, same as ORB/TTTF/DTTF/STTF.
                   const representativeSymbol = alert.indices_triggered.includes('SPY') ? 'SPY' : alert.indices_triggered[0]
                   const isRepresentativeLeg = leg.symbol === representativeSymbol
                   const strikeBasisPrice = isIV && isRepresentativeLeg && alert.confluence_level != null ? alert.confluence_level : leg.entry_price

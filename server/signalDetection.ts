@@ -16,7 +16,7 @@ const isNear = (price: number, target: number | null, tolerance: number): boolea
 }
 
 // Early momentum signal: MACD curl + price sitting at a support/resistance level,
-// with no RSI divergence required (that's what makes it "earlier" than TTF/DTF/STF).
+// with no RSI divergence required (that's what makes it "earlier" than TTTF/DTTF/STTF).
 // Requires 2+ indices sharing the same MACD curl direction.
 export const detectIVSignal = (
   direction: 'bullish' | 'bearish',

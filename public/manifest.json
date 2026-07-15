@@ -1,7 +1,7 @@
 {
   "name": "FlipTrader",
   "short_name": "FlipTrader",
-  "description": "Real-time trading alerts with TTF/DTF/STF signals",
+  "description": "Real-time trading alerts with TTTF/DTTF/STTF signals",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
