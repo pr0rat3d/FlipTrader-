@@ -2,7 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { getIntradayCandles, Candle } from '../../server/twelvedata.js'
 import { analyzeCandles } from '../../server/indicators.js'
-import { isMarketOpen, nyDateKey } from '../../server/marketHours.js'
+import { isMarketOpen } from '../../server/marketHours.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
@@ -21,6 +21,15 @@ import { getQuote } from '../../server/finnhub.js'
 // Twelve Data - a separate quota from the per-minute credit budget the three
 // confluence indices already fully commit between them.
 const VIX_PROXY_SYMBOL = 'VIXY'
+
+// How far back a MACD cross can be and still "back" a fresh breakout/
+// continuation - a fixed, continuously-rolling window (NOT reset at each
+// session's calendar-day boundary, which was tried first and found to miss
+// crosses from late in the prior session - see analyzeCandles/git history,
+// 2026-07-15). 30 bars on 5-min candles = ~2.5 trading hours; long enough to
+// catch a cross from earlier today or late yesterday, short enough that a
+// genuinely multi-day-stale cross still doesn't count as "recent."
+const MACD_CURL_LOOKBACK_BARS = 30
 
 // Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
 // day-trading default, not load-bearing anywhere downstream, easy to tune.
@@ -103,15 +112,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const vwap = calculateSessionVWAP(candles)
       await recordSnapshot(symbol, 'day_trade', candles, { vwap })
 
-      // A MACD cross earlier in today's session still backs a breakout/
-      // continuation that plays out later - see analyzeCandles for why a
-      // bare latest-bar-only check misses exactly this (SPY, 2026-07-14:
-      // crossed bullish at the open, broke the opening range 17 min later
-      // with MACD never having given back the signal line - zero alerts
-      // fired all session because the cross and the breakout bar differed).
-      const today = nyDateKey(new Date())
-      const sessionBarCount = candles.filter(c => nyDateKey(c.datetime) === today).length
-      const signal = analyzeCandles(closes, sessionBarCount)
+      // A MACD cross within the last ~2.5 trading hours still backs a
+      // breakout/continuation that plays out later - see analyzeCandles for
+      // why a bare latest-bar-only check misses exactly this (SPY,
+      // 2026-07-14: crossed bullish at the open, broke the opening range 17
+      // min later with MACD never having given back the signal line - zero
+      // alerts fired all session because the cross and the breakout bar
+      // differed). A calendar-day session boundary was tried first and
+      // found to still miss this: IWM's cross on 2026-07-15 turned out to
+      // have happened 3:40pm ET the PRIOR day (only 20 bars back), which a
+      // "since today's open" reset can never see regardless of how far into
+      // the current session it gets. A fixed trailing-bar count that rolls
+      // forward continuously (no reset) catches both cases.
+      const signal = analyzeCandles(closes, MACD_CURL_LOOKBACK_BARS)
 
       if (signal) {
         const atrValues = calculateATR(candles.map(c => c.high), candles.map(c => c.low), closes, 14)
