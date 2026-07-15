@@ -3,7 +3,7 @@ import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
-import { getOrder, placeOrder, getOptionQuote, getOptionBars1Min } from '../../server/execution/alpacaClient.js'
+import { getOrder, placeOrder, getOptionQuote } from '../../server/execution/alpacaClient.js'
 import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import {
   RUNNER_TIME_LOCK_HOUR_ET, RUNNER_TIME_LOCK_MINUTE_ET, RUNNER_TIME_LOCK_MIN_PCT,
@@ -145,17 +145,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const quote = await getOptionQuote(position.option_symbol)
         if (!quote) continue
 
-        // --- Hard stop: on a CLOSED 1-min candle of the OPTION's own price,
-        // not a wick - mirrors the shares model's catastrophic backstop
-        // pattern, just watching the option instead of the underlying.
-        // stop_pct starts at execution_settings.hard_stop_pct (30%) and
-        // ratchets to 0 (breakeven) the moment the first tier sells.
-        const bars = await getOptionBars1Min(position.option_symbol, new Date(now.getTime() - 10 * 60 * 1000), now)
-        const closedBars = (bars || []).filter(b => new Date(b.t).getTime() + 60_000 <= now.getTime())
-        const lastClosed = closedBars[closedBars.length - 1]
-
-        if (lastClosed) {
-          const adverseMove = (position.premium_entry - lastClosed.c) / position.premium_entry
+        // --- Hard stop: on the option's current bid, checked every poll.
+        // Originally designed as a CLOSED 1-min candle check (mirroring the
+        // shares model's catastrophic backstop, "not a wick"), but Alpaca's
+        // options bars endpoint requires a separate signed OPRA agreement -
+        // found live 2026-07-15 that it 403s on this account
+        // ("OPRA agreement is not signed"), meaning getOptionBars1Min always
+        // returned null and this check had NEVER ONCE EXECUTED since the bot
+        // went live. Three real positions ran 40-80% past this exact
+        // threshold with zero protection before that was caught. A quote-
+        // based check trades away the "closed candle, not a wick" smoothing
+        // for a check that actually runs - options quotes were already
+        // proven reliable (they're what tier fills/runner logic use every
+        // poll) where bars were not. stop_pct starts at
+        // execution_settings.hard_stop_pct (30%) and ratchets to 0
+        // (breakeven) the moment the first tier sells.
+        {
+          const adverseMove = (position.premium_entry - quote.bid) / position.premium_entry
           const stopPct = position.stop_pct ?? 0.30
 
           if (adverseMove >= stopPct) {
@@ -164,7 +170,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               await supabase.from('option_positions').update({
                 status: stopPct > 0 ? 'closed_hard_stop' : 'closed_stop',
                 remaining_contracts: 0, closed_at: now.toISOString(),
-                review_reason: `stop triggered: ${(adverseMove * 100).toFixed(1)}% adverse on closed candle (threshold ${(stopPct * 100).toFixed(0)}%)`
+                review_reason: `stop triggered: ${(adverseMove * 100).toFixed(1)}% adverse on live quote (threshold ${(stopPct * 100).toFixed(0)}%)`
               }).eq('id', position.id)
               await notifyManualReview(position.underlying_symbol, `Stop triggered - flattened at market (${(adverseMove * 100).toFixed(1)}% adverse)`)
               closed++
