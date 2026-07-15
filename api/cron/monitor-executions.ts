@@ -197,7 +197,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // Tiers are ascending by target_pct - stop at the first threshold
           // not yet met rather than checking the rest.
           if (currentPct < tier.target_pct) break
-          if (remaining <= 1) break // always leave the runner's 1 contract
+          // Only reserve the last contract when this plan actually has a
+          // runner tier to reserve it for (see optionPositionSizing.ts - the
+          // 2-contract plan has none, and is meant to fully exit by its last
+          // fixed tier).
+          if (runner && remaining <= 1) break
 
           const result = await sellAtMarket(position.option_symbol, 1, ids.tier(tier.tier_number))
           if (!result.orderId) {

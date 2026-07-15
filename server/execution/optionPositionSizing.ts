@@ -1,11 +1,18 @@
 // Contract count drives which scale-out tier plan applies (not a fixed
 // 30/30/30/10 split like the old shares model) - each count from 2-5 has its
 // own explicit ladder, matched to how far the runner needs to be able to run.
-const TIER_PLANS: Record<number, number[]> = {
-  2: [0.15],
-  3: [0.10, 0.20],
-  4: [0.10, 0.20, 0.30],
-  5: [0.10, 0.20, 0.30, 0.50]
+//
+// 2 contracts is the one exception with no runner at all: too small a
+// position to dedicate a whole contract to an open-ended +100% ride. Both
+// contracts fully exit by +30% at the latest - tier 1 at +15%, tier 2 at
+// +30% - with contract 2 protected at breakeven the moment tier 1 fires
+// (the existing stop_pct-ratchet-to-0-on-any-tier-fill behavior in
+// monitor-executions.ts already covers this, no separate mechanism needed).
+const TIER_PLANS: Record<number, { pcts: number[]; hasRunner: boolean }> = {
+  2: { pcts: [0.15, 0.30], hasRunner: false },
+  3: { pcts: [0.10, 0.20], hasRunner: true },
+  4: { pcts: [0.10, 0.20, 0.30], hasRunner: true },
+  5: { pcts: [0.10, 0.20, 0.30, 0.50], hasRunner: true }
 }
 
 export const RUNNER_TIER_NUMBER = 99
@@ -41,11 +48,13 @@ export interface TierSpec {
 }
 
 // The fixed-pct tiers for this contract count, plus the runner as the final
-// entry - e.g. 3 contracts -> [{1, 10%}, {2, 20%}, {runner, 100%}].
+// entry if this plan has one - e.g. 3 contracts -> [{1, 10%}, {2, 20%},
+// {runner, 100%}]; 2 contracts -> [{1, 15%}, {2, 30%}], no runner.
 export const tierPlanFor = (contracts: number): TierSpec[] => {
-  const pcts = TIER_PLANS[contracts] ?? []
-  const fixed = pcts.map((targetPct, i) => ({ tierNumber: i + 1, isRunner: false, targetPct }))
-  return [...fixed, { tierNumber: RUNNER_TIER_NUMBER, isRunner: true, targetPct: RUNNER_TARGET_PCT }]
+  const plan = TIER_PLANS[contracts]
+  if (!plan) return []
+  const fixed = plan.pcts.map((targetPct, i) => ({ tierNumber: i + 1, isRunner: false, targetPct }))
+  return plan.hasRunner ? [...fixed, { tierNumber: RUNNER_TIER_NUMBER, isRunner: true, targetPct: RUNNER_TARGET_PCT }] : fixed
 }
 
 export type ContractSizeRejectReason =
