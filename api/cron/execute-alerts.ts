@@ -21,6 +21,46 @@ const FILL_POLL_ATTEMPTS = 8
 const FILL_POLL_INTERVAL_MS = 1000
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
+// A fresh signal clearing every entry gate (confidence, IV timing, etc.) in
+// the OPPOSITE direction from a currently open position means the thesis it
+// was bought on has flipped - flatten everything open (any symbol, not just
+// the one the new signal is on) rather than hold contracts betting against
+// evidence strong enough to trigger a real new trade. Runs right before the
+// atomic claim for a qualifying leg, so it only fires when the bot is
+// actually about to act on the opposing signal, not on every scan.
+const closeOpposingPositions = async (newDirection: 'bullish' | 'bearish'): Promise<number> => {
+  const { data: openPositions, error } = await supabase
+    .from('option_positions')
+    .select('id, underlying_symbol, option_symbol, remaining_contracts, direction')
+    .eq('status', 'open')
+  if (error) throw error
+
+  const opposing = (openPositions || []).filter(p => p.direction !== newDirection && p.option_symbol && p.remaining_contracts > 0)
+  let closed = 0
+
+  for (const pos of opposing) {
+    try {
+      // placeOrder throws on failure - reaching the update below means it
+      // genuinely succeeded.
+      await placeOrder({
+        symbol: pos.option_symbol, qty: pos.remaining_contracts, side: 'sell', type: 'market', timeInForce: 'day',
+        clientOrderId: `opposing-flip-${pos.id}-${Date.now()}`
+      })
+      await supabase.from('option_positions').update({
+        status: 'closed_manual', remaining_contracts: 0, closed_at: new Date().toISOString(),
+        review_reason: `Closed automatically - a fresh ${newDirection} signal cleared entry gates while this ${pos.direction} position was still open`
+      }).eq('id', pos.id)
+      closed++
+    } catch (e) {
+      await supabase.from('option_positions').update({
+        needs_manual_review: true, review_reason: `opposing-direction flatten failed: ${String(e)}`
+      }).eq('id', pos.id)
+    }
+  }
+
+  return closed
+}
+
 interface OpenLeg {
   id: string
   symbol: string
@@ -131,6 +171,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         leg.day_trade_alerts?.ttf_status === 'IV' &&
         nyMinutesSinceMidnight(new Date()) < MARKET_OPEN_MINUTES_ET + IV_ELIGIBLE_AFTER_MINUTES
       ) continue
+
+      // This leg has cleared every entry gate - if that means the bot is
+      // about to act on a signal opposite to something already open (any
+      // symbol), flatten the old position(s) first.
+      await closeOpposingPositions(direction)
 
       const { data: claimed, error: claimError } = await supabase
         .from('option_positions')

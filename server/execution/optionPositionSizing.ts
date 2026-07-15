@@ -69,8 +69,14 @@ export type ContractSizeResult =
   | { ok: true; contracts: number }
   | { ok: false; reason: ContractSizeRejectReason }
 
-// Risk-based (same 1%-of-equity budget the shares model used), but clamped
-// into [2, 5] - "at least 2" is a hard floor from the tiering strategy itself
+// Budget is riskPct of BUYING POWER, not equity - found live 2026-07-15 that
+// equity*riskPct (1%) produced a budget ($20 on a $2000 account) smaller than
+// almost any real option's cost (premium x 100), so `desired` was always ~0
+// and every single entry was just hitting the MIN_CONTRACTS floor - the
+// "risk-based" sizing was never actually driving anything. riskPct is meant
+// to be reconfigured to something like 0.10 (10% of buying power) to match:
+// e.g. $4,000 BP -> $400 budget -> as many contracts as fit under $400,
+// capped at 5. "At least 2" is a hard floor from the tiering strategy itself
 // (you can't scale out of 1 contract), not a risk-derived number, so a cheap
 // premium that would risk-size to 0-1 contracts still gets bumped up to 2 as
 // long as it's affordable; an expensive premium that would risk-size above 5
@@ -86,7 +92,7 @@ export const computeContractCount = (input: ContractSizeInput, settings: Contrac
   }
 
   const costPerContract = premiumAsk * 100
-  const riskBudget = accountEquity * riskPct
+  const riskBudget = buyingPower * riskPct
   const desired = Math.floor(riskBudget / costPerContract)
   const clamped = Math.min(MAX_CONTRACTS, Math.max(MIN_CONTRACTS, desired))
 
