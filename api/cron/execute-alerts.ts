@@ -217,20 +217,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // (any resolution) still guards re-entry until momentum actually
       // resets - see hasMomentumReset above. Only today's close matters; a
       // resolved position from a prior session has no bearing on a fresh
-      // session's first move.
-      const { data: lastClosedRows, error: lastClosedError } = await supabase
-        .from('option_positions')
-        .select('closed_at')
-        .eq('underlying_symbol', leg.symbol)
-        .eq('direction', direction)
-        .not('closed_at', 'is', null)
-        .order('closed_at', { ascending: false })
-        .limit(1)
-      if (lastClosedError) throw lastClosedError
-      const lastClosedAt = lastClosedRows?.[0]?.closed_at
-      if (lastClosedAt && nyDateKey(lastClosedAt) === today) {
-        const reset = await hasMomentumReset(leg.symbol, direction, lastClosedAt)
-        if (!reset) continue
+      // session's first move. IV and ORB are exactly the repetitive-re-fire
+      // case this gate targets (re-firing every few minutes off the same
+      // static level/breakout with no new price structure behind it) - but
+      // TTF/DTF/STF is exempt, since RSI divergence requires a genuinely NEW
+      // price extreme with RSI failing to confirm it (detectRSIDivergence)
+      // to fire at all. A second full-confluence signal later in the day
+      // already IS the proof of a fresh pullback-and-turn; gating it on the
+      // histogram too would risk blocking a legitimate high-confidence
+      // re-entry during a strong, persistently one-sided trend day where the
+      // histogram simply never dips back through zero.
+      const ttfStatus = leg.day_trade_alerts?.ttf_status
+      if (ttfStatus === 'IV' || ttfStatus === 'ORB') {
+        const { data: lastClosedRows, error: lastClosedError } = await supabase
+          .from('option_positions')
+          .select('closed_at')
+          .eq('underlying_symbol', leg.symbol)
+          .eq('direction', direction)
+          .not('closed_at', 'is', null)
+          .order('closed_at', { ascending: false })
+          .limit(1)
+        if (lastClosedError) throw lastClosedError
+        const lastClosedAt = lastClosedRows?.[0]?.closed_at
+        if (lastClosedAt && nyDateKey(lastClosedAt) === today) {
+          const reset = await hasMomentumReset(leg.symbol, direction, lastClosedAt)
+          if (!reset) continue
+        }
       }
 
       // This leg has cleared every entry gate - if that means the bot is
