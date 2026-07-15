@@ -19,6 +19,18 @@ export const config = {
 // only prevents new entries (see execute-alerts.ts). Pausing new entries must
 // never mean "stop protecting positions already open."
 
+// Protects entry+5%, not exact breakeven, once a tier fills - this poller has
+// no internal sub-loop (unlike track-profit-targets.ts's 3x/~18s), so it only
+// checks about once a minute. Found live 2026-07-15: QQQ 715C's stop_pct=0
+// (exact breakeven) trigger didn't fire until price had ALREADY drifted 5.1%
+// past it between polls ("5.1% adverse on live quote (threshold 0%)"),
+// landing the fill below entry instead of at it. A negative stop_pct here
+// means "sell once price falls to entry * (1 + |stop_pct|)" - same
+// adverseMove >= stopPct comparison the hard stop below already uses, just
+// with a threshold that's ahead of breakeven instead of at it, to absorb
+// that same ~5% of poll-interval drift without giving back into a loss.
+const BREAKEVEN_PROTECTION_STOP_PCT = -0.05
+
 // A grace period before treating a stuck 'claimed'/'entry_submitted' row as
 // needing reconciliation - comfortably past a normal happy-path completion.
 const RECONCILE_GRACE_MS = 2 * 60 * 1000
@@ -158,11 +170,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // for a check that actually runs - options quotes were already
         // proven reliable (they're what tier fills/runner logic use every
         // poll) where bars were not. stop_pct starts at
-        // execution_settings.hard_stop_pct (30%) and ratchets to 0
-        // (breakeven) the moment the first tier sells.
+        // execution_settings.hard_stop_pct (25% - tightened from 30% for the
+        // same poll-interval-drift reason as BREAKEVEN_PROTECTION_STOP_PCT
+        // above) and ratchets to BREAKEVEN_PROTECTION_STOP_PCT the moment the
+        // first tier sells.
         {
           const adverseMove = (position.premium_entry - quote.bid) / position.premium_entry
-          const stopPct = position.stop_pct ?? 0.30
+          const stopPct = position.stop_pct ?? 0.25
 
           if (adverseMove >= stopPct) {
             const result = await sellAtMarket(position.option_symbol, position.remaining_contracts, ids.hardStop)
@@ -248,7 +262,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
 
         if (!runnerClosed && anyTierFilledThisRun) {
-          await supabase.from('option_positions').update({ remaining_contracts: remaining, stop_pct: 0 }).eq('id', position.id)
+          await supabase.from('option_positions').update({ remaining_contracts: remaining, stop_pct: BREAKEVEN_PROTECTION_STOP_PCT }).eq('id', position.id)
         }
       } catch (positionError) {
         console.error(`Error managing option position ${position.id} (${position.underlying_symbol}):`, positionError)
