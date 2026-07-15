@@ -172,6 +172,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         nyMinutesSinceMidnight(new Date()) < MARKET_OPEN_MINUTES_ET + IV_ELIGIBLE_AFTER_MINUTES
       ) continue
 
+      // Don't pyramid into the same symbol+direction while a position is
+      // already open there - a same-direction re-fire (e.g. QQQ 713C already
+      // open, a fresh alert re-fires at 714C a dollar later as price
+      // drifted) doesn't need its own separate position; the existing one
+      // already has the trade on. Skip entirely rather than claim/enter -
+      // this is a "no action needed," not a failure to record.
+      const { data: sameDirectionOpen, error: sameDirectionError } = await supabase
+        .from('option_positions')
+        .select('id')
+        .eq('underlying_symbol', leg.symbol)
+        .eq('direction', direction)
+        .eq('status', 'open')
+        .limit(1)
+      if (sameDirectionError) throw sameDirectionError
+      if (sameDirectionOpen && sameDirectionOpen.length > 0) continue
+
       // This leg has cleared every entry gate - if that means the bot is
       // about to act on a signal opposite to something already open (any
       // symbol), flatten the old position(s) first.
