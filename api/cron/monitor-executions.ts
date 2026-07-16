@@ -7,7 +7,7 @@ import { getOrder, placeOrder, cancelOrder, getOptionQuote } from '../../server/
 import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import {
   RUNNER_TIME_LOCK_HOUR_ET, RUNNER_TIME_LOCK_MINUTE_ET, RUNNER_TIME_LOCK_MIN_PCT,
-  FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET
+  FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, BREAKEVEN_PROTECTION_STOP_PCT
 } from '../../server/execution/optionPositionSizing.js'
 import { nyMinutesSinceMidnight } from '../../server/rvol.js'
 
@@ -45,17 +45,6 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // Intentionally does NOT check execution_settings.is_enabled - the kill switch
 // only prevents new entries (see execute-alerts.ts). Pausing new entries must
 // never mean "stop protecting positions already open."
-
-// Protects entry+5%, not exact breakeven, once a tier fills - found live
-// 2026-07-15: QQQ 715C's stop_pct=0 (exact breakeven) trigger didn't fire
-// until price had ALREADY drifted 5.1% past it between polls ("5.1% adverse
-// on live quote (threshold 0%)"), landing the fill below entry instead of
-// at it. A negative stop_pct here means "sell once price falls to entry *
-// (1 + |stop_pct|)" - same adverseMove >= stopPct comparison the hard stop
-// below already uses, just with a threshold that's ahead of breakeven
-// instead of at it, to absorb that same ~5% of poll-interval drift without
-// giving back into a loss.
-const BREAKEVEN_PROTECTION_STOP_PCT = -0.05
 
 // A grace period before treating a stuck 'claimed'/'entry_submitted' row as
 // needing reconciliation - comfortably past a normal happy-path completion.

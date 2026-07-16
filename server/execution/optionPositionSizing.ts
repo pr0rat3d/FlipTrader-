@@ -18,6 +18,24 @@ const TIER_PLANS: Record<number, { pcts: number[]; hasRunner: boolean }> = {
 export const RUNNER_TIER_NUMBER = 99
 export const RUNNER_TARGET_PCT = 1.00
 
+// Mirrors execution_settings.hard_stop_pct's current live value (2026-07-16) -
+// the DB row is the actual source of truth for live trading, this constant
+// exists so the backtest (which has no DB row to read) can size/simulate
+// against the same number without it drifting out of sync if someone forgets
+// to update one when tuning the other.
+export const HARD_STOP_PCT_DEFAULT = 0.25
+
+// Protects entry+5%, not exact breakeven, once a tier fills - found live
+// 2026-07-15: QQQ 715C's stop_pct=0 (exact breakeven) trigger didn't fire
+// until price had ALREADY drifted 5.1% past it between polls, landing the
+// fill below entry instead of at it. A negative value here means "sell once
+// price falls to entry * (1 + |value|)" - same adverseMove >= stopPct
+// comparison the hard stop uses, just with a threshold ahead of breakeven
+// instead of at it, to absorb that ~5% of poll-interval drift without
+// giving back into a loss. Shared by monitor-executions.ts (live) and the
+// backtest P&L simulator, so both use the exact same ratchet target.
+export const BREAKEVEN_PROTECTION_STOP_PCT = -0.05
+
 // IV is a reversal-at-a-level signal, and the first half hour of the session
 // is exactly when levels get tested and violated repeatedly as the opening
 // auction resolves - noisier, less reliable reversals than later in the day.

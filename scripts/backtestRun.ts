@@ -5,13 +5,17 @@
 // the underlying's own target/stop the same way profit_targets already
 // does live (applyPriceSample/checkExpiry, reused unchanged).
 //
-// This is a SIGNAL backtest, not a P&L backtest - it answers "does this
-// entry/exit logic have a directional edge on the underlying," not "what
-// dollar P&L would the options bot have made." Real option premium P&L
-// depends on execution/slippage/liquidity effects this can't capture (see
+// Phase 1 (signal-level) answers "does this entry/exit logic have a
+// directional edge on the underlying." Phase 2 (2026-07-16, see
+// simulateOptionPnl below) layers an approximate option-premium P&L on top,
+// using a Black-Scholes model calibrated against 2026-07-15's real fills -
+// NOT real historical options data (unaffordable without the $99/mo Alpaca
+// Algo Trader Plus plan - see server/backtest/blackScholes.ts's header).
+// Read Phase 2 numbers as "does this look directionally profitable," not
+// "this is the dollar amount the bot would have made" - real execution/
+// slippage/liquidity effects aren't captured by either phase (see
 // report_out/2026-07-15.md's risk findings for why those matter a lot in
-// practice). A second phase approximating option P&L is a separate,
-// future piece of work.
+// practice).
 //
 // Deliberately evaluates EVERY 5-min bar, unlike live's scan-confluence.ts
 // (which throttles to every 3rd minute outside prime time purely to stay
@@ -40,6 +44,7 @@ import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
 import { deriveMilestonePrices, applyPriceSample, checkExpiry, ProfitTargetRow } from '../server/alertOutcomes.js'
 import { nyDateKey } from '../server/marketHours.js'
+import { simulateOptionPnl, volatilityAt, OptionPnlOutcome, PathPoint } from '../server/backtest/optionPnlSimulator.js'
 
 const SYMBOLS = ['SPY', 'QQQ', 'IWM'] as const
 type Symbol = typeof SYMBOLS[number]
@@ -49,6 +54,22 @@ const RSI_DIVERGENCE_LOOKBACK_BARS = 5
 const HISTOGRAM_DECELERATION_BARS = 3
 const ATR_STOP_MULTIPLIER = 1.5
 const ROLLING_WINDOW_BARS = 300 // matches live's getIntradayCandles(symbol, 300) default
+const VOL_WINDOW_BARS = 30 // trailing bars used for the realized-vol proxy at entry
+
+// Fixed simulated account, not a compounding/concurrent-position-aware
+// running balance - every leg is sized as if it were the only position open
+// against this same starting capital. A real account's buying power shrinks
+// while other positions are open and grows/shrinks with realized P&L; this
+// backtest doesn't model that, so position COUNT and sizing here won't
+// perfectly reflect what a real concurrently-constrained account would have
+// done. Matches the live account's current rough scale and
+// execution_settings values (2026-07-16) so the sizing math itself is at
+// least using real numbers, not arbitrary ones.
+const SIM_EQUITY = 2000
+const SIM_BUYING_POWER = 4000
+const SIM_RISK_PCT = 0.10
+const SIM_MIN_EQUITY = 500
+const SIM_MAX_EQUITY = 5000
 
 const stopLossFor = (direction: 'bullish' | 'bearish', entryPrice: number, atr: number | null): number | null => {
   if (atr === null) return null
@@ -63,6 +84,7 @@ interface BacktestLeg extends ProfitTargetRow {
   confidence: number
   entryTimeIso: string
   status: 'open' | 'target_hit' | 'stopped_out' | 'expired'
+  optionPnl: OptionPnlOutcome | null
 }
 
 interface PerSymbolBar {
@@ -145,19 +167,43 @@ const main = async () => {
   const openLegsBySymbol: Record<Symbol, BacktestLeg[]> = { SPY: [], QQQ: [], IWM: [] }
   let nextLegId = 1
 
+  // Forward path for the P&L simulator: from the entry bar through the rest
+  // of that same NY trading day (consecutive bars only - stops the instant
+  // the day rolls over, since a 0DTE contract doesn't exist past its own
+  // session's close).
+  const forwardPathFor = (symbol: Symbol, globalIndex: number): PathPoint[] => {
+    const entryDayKey = nyDateKey(intradayCandles[symbol][globalIndex].datetime)
+    const path: PathPoint[] = []
+    for (let i = globalIndex; i < intradayCandles[symbol].length; i++) {
+      const c = intradayCandles[symbol][i]
+      if (nyDateKey(c.datetime) !== entryDayKey) break
+      path.push({ timestamp: c.datetime, close: c.close })
+    }
+    return path
+  }
+
   const makeLeg = (
     ttfStatus: string, symbol: Symbol, direction: 'bullish' | 'bearish', confidence: number,
-    entryTime: Date, entryPrice: number, target50EMA: number, atr: number | null
+    entryTime: Date, entryPrice: number, target50EMA: number, atr: number | null, globalIndex: number
   ): BacktestLeg => {
     const stopLossPrice = stopLossFor(direction, entryPrice, atr)
     const milestones = deriveMilestonePrices(entryPrice, target50EMA)
+
+    const forwardPath = forwardPathFor(symbol, globalIndex)
+    const volWindow = intradayCandles[symbol].slice(Math.max(0, globalIndex - VOL_WINDOW_BARS + 1), globalIndex + 1).map(c => c.close)
+    const volAtEntry = volatilityAt(volWindow)
+    const optionPnl = simulateOptionPnl(direction, target50EMA, forwardPath, volAtEntry, {
+      equity: SIM_EQUITY, buyingPower: SIM_BUYING_POWER, riskPct: SIM_RISK_PCT, minEquity: SIM_MIN_EQUITY, maxEquity: SIM_MAX_EQUITY
+    })
+
     return {
       id: nextLegId++, ttfStatus, symbol, direction, confidence, entryTimeIso: entryTime.toISOString(), status: 'open',
       entry_price: entryPrice, target_50ema_price: target50EMA, stop_loss_price: stopLossPrice,
       milestone_10_price: milestones.milestone10, milestone_10_hit_at: null,
       milestone_20_price: milestones.milestone20, milestone_20_hit_at: null,
       milestone_30_price: milestones.milestone30, milestone_30_hit_at: null,
-      max_favorable_pct: null, target_hit_at: null, stopped_out_at: null
+      max_favorable_pct: null, target_hit_at: null, stopped_out_at: null,
+      optionPnl
     }
   }
 
@@ -247,7 +293,7 @@ const main = async () => {
       })
 
       for (const r of signalResults) {
-        const leg = makeLeg(ttfStatus, r.symbol, r.rsiDivergence as 'bullish' | 'bearish', confidence, now, r.entryPrice, r.target50EMA, r.atr)
+        const leg = makeLeg(ttfStatus, r.symbol, r.rsiDivergence as 'bullish' | 'bearish', confidence, now, r.entryPrice, r.target50EMA, r.atr, r.globalIndex)
         legs.push(leg)
         openLegsBySymbol[r.symbol].push(leg)
       }
@@ -276,7 +322,7 @@ const main = async () => {
         })
 
         for (const s of divergent) {
-          const leg = makeLeg('DIV', s.symbol, direction, confidence, now, s.entryPrice, s.target50EMA, s.atr)
+          const leg = makeLeg('DIV', s.symbol, direction, confidence, now, s.entryPrice, s.target50EMA, s.atr, s.globalIndex)
           legs.push(leg)
           openLegsBySymbol[s.symbol].push(leg)
         }
@@ -309,7 +355,7 @@ const main = async () => {
         for (const s of directional) {
           const legStop = stopLossFor(direction, s.entryPrice, s.atr)
           const legTarget = continuationTargetPrice(direction, s.entryPrice, legStop)
-          const leg = makeLeg('IV', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr)
+          const leg = makeLeg('IV', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr, s.globalIndex)
           legs.push(leg)
           openLegsBySymbol[s.symbol].push(leg)
         }
@@ -342,7 +388,7 @@ const main = async () => {
         for (const s of candidates) {
           const legStop = stopLossFor(direction, s.entryPrice, s.atr)
           const legTarget = continuationTargetPrice(direction, s.entryPrice, legStop)
-          const leg = makeLeg('ORB', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr)
+          const leg = makeLeg('ORB', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr, s.globalIndex)
           legs.push(leg)
           openLegsBySymbol[s.symbol].push(leg)
         }
@@ -378,6 +424,27 @@ const main = async () => {
     rows.push(`${type.padEnd(8)} ${String(typeLegs.length).padEnd(6)} ${String(hit).padEnd(10)} ${String(stopped).padEnd(11)} ${String(expired).padEnd(8)} ${String(open).padEnd(5)} ${winRate.padEnd(8)} ${avgConf}`)
   }
   console.log(rows.join('\n'))
+
+  // --- Phase 2: approximate option P&L (Black-Scholes model, see
+  // server/backtest/blackScholes.ts's header for what this can and can't
+  // tell you) ---
+  console.log('\n--- Phase 2: approximate option P&L (modeled, not real historical prices) ---')
+  const pnlRows: string[] = []
+  pnlRows.push('Type     Priced  Skipped  TotalPnL     AvgPnL/leg  WinRate($)')
+  let grandTotalPnl = 0
+  for (const [type, typeLegs] of [...byType.entries()].sort((a, b) => b[1].length - a[1].length)) {
+    const priced = typeLegs.filter((l): l is BacktestLeg & { optionPnl: OptionPnlOutcome & { realizedPnl: number } } =>
+      l.optionPnl !== null && !('skipped' in l.optionPnl))
+    const skipped = typeLegs.length - priced.length
+    const totalPnl = priced.reduce((sum, l) => sum + l.optionPnl.realizedPnl, 0)
+    const avgPnl = priced.length > 0 ? totalPnl / priced.length : 0
+    const winners = priced.filter(l => l.optionPnl.realizedPnl > 0).length
+    const dollarWinRate = priced.length > 0 ? ((winners / priced.length) * 100).toFixed(1) + '%' : '—'
+    grandTotalPnl += totalPnl
+    pnlRows.push(`${type.padEnd(8)} ${String(priced.length).padEnd(7)} ${String(skipped).padEnd(8)} $${totalPnl.toFixed(0).padEnd(11)} $${avgPnl.toFixed(0).padEnd(10)} ${dollarWinRate}`)
+  }
+  console.log(pnlRows.join('\n'))
+  console.log(`\nGrand total modeled P&L: $${grandTotalPnl.toFixed(0)} (fixed $${SIM_EQUITY} simulated equity per leg, not compounding/concurrent-aware - see SIM_EQUITY comment)`)
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}.json`
