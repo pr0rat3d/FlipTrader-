@@ -5,17 +5,31 @@
 // the underlying's own target/stop the same way profit_targets already
 // does live (applyPriceSample/checkExpiry, reused unchanged).
 //
-// Phase 1 (signal-level) answers "does this entry/exit logic have a
-// directional edge on the underlying." Phase 2 (2026-07-16, see
-// simulateOptionPnl below) layers an approximate option-premium P&L on top,
-// using a Black-Scholes model calibrated against 2026-07-15's real fills -
-// NOT real historical options data (unaffordable without the $99/mo Alpaca
-// Algo Trader Plus plan - see server/backtest/blackScholes.ts's header).
-// Read Phase 2 numbers as "does this look directionally profitable," not
-// "this is the dollar amount the bot would have made" - real execution/
-// slippage/liquidity effects aren't captured by either phase (see
-// report_out/2026-07-15.md's risk findings for why those matter a lot in
-// practice).
+// Phase 1 (signal-level, `legs`) answers "does this entry/exit logic have a
+// directional edge on the underlying" - ungated, every fired signal gets
+// its own row regardless of whether the real bot would ever have traded it.
+//
+// Phase 2 (2026-07-16, `executedPositions`) replays the REAL entry gates
+// from execute-alerts.ts (min_confidence, IV's 30-min gate, same-symbol
+// dedup, the momentum-reset gate with ORB's high-confidence exemption, the
+// opposing-signal close-all, the force-close cutoff) against a single
+// shared, evolving simulated account - not independent per-signal capital.
+// This is what answers "how many trades would the real gated system
+// actually have taken, and what would it have made." Option premium P&L
+// is a Black-Scholes MODEL, not real historical options data (unaffordable
+// without the $99/mo Alpaca Algo Trader Plus plan - see
+// server/backtest/blackScholes.ts's header). Read Phase 2 numbers as "does
+// this look directionally profitable, and roughly how many trades," not
+// "this is the exact dollar amount the bot would have made" - real
+// execution/slippage/liquidity effects aren't captured by either phase.
+//
+// One live gate this backtest can't meaningfully replay: the 5-minute
+// staleness cutoff on unclaimed profit_targets legs. That gate exists
+// because live execution polls asynchronously, so a signal can sit
+// unclaimed in a backlog for a while before something frees it up to
+// execute. This backtest acts on every signal the instant it fires (no
+// polling delay), so there's no backlog for a leg to go stale in - the
+// gate has nothing to do here by construction, not because it was skipped.
 //
 // Deliberately evaluates EVERY 5-min bar, unlike live's scan-confluence.ts
 // (which throttles to every 3rd minute outside prime time purely to stay
@@ -37,14 +51,18 @@ import { Candle } from '../server/twelvedata.js'
 import { fetchIntradayHistory, fetchDailyHistory } from '../server/backtest/fetchHistory.js'
 import { dailyLevelsAsOf, openingRangeFor, supportResistanceLevelsAsOf } from '../server/backtest/replayHelpers.js'
 import { analyzeCandles } from '../server/indicators.js'
-import { calculateATR } from '../src/lib/technicalIndicators.js'
+import { calculateATR, calculateMACD } from '../src/lib/technicalIndicators.js'
 import { detectIVSignal } from '../server/signalDetection.js'
 import { detectCandlestickPattern } from '../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
 import { deriveMilestonePrices, applyPriceSample, checkExpiry, ProfitTargetRow } from '../server/alertOutcomes.js'
 import { nyDateKey } from '../server/marketHours.js'
-import { simulateOptionPnl, volatilityAt, OptionPnlOutcome, PathPoint } from '../server/backtest/optionPnlSimulator.js'
+import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition } from '../server/backtest/optionPnlSimulator.js'
+import {
+  MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET
+} from '../server/execution/optionPositionSizing.js'
+import { nyMinutesSinceMidnight } from '../server/rvol.js'
 
 const SYMBOLS = ['SPY', 'QQQ', 'IWM'] as const
 type Symbol = typeof SYMBOLS[number]
@@ -56,17 +74,23 @@ const ATR_STOP_MULTIPLIER = 1.5
 const ROLLING_WINDOW_BARS = 300 // matches live's getIntradayCandles(symbol, 300) default
 const VOL_WINDOW_BARS = 30 // trailing bars used for the realized-vol proxy at entry
 
-// Fixed simulated account, not a compounding/concurrent-position-aware
-// running balance - every leg is sized as if it were the only position open
-// against this same starting capital. A real account's buying power shrinks
-// while other positions are open and grows/shrinks with realized P&L; this
-// backtest doesn't model that, so position COUNT and sizing here won't
-// perfectly reflect what a real concurrently-constrained account would have
-// done. Matches the live account's current rough scale and
-// execution_settings values (2026-07-16) so the sizing math itself is at
-// least using real numbers, not arbitrary ones.
-const SIM_EQUITY = 2000
-const SIM_BUYING_POWER = 4000
+// Entry-gate constants mirroring execute-alerts.ts's current live values
+// (2026-07-16) - kept here rather than imported, since execute-alerts.ts is
+// a Vercel API handler, not a library module meant to be imported from a
+// script. Re-check these against execution_settings/execute-alerts.ts if
+// they're ever retuned live, since nothing enforces they stay in sync.
+const MIN_CONFIDENCE = 0.65
+const ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD = 0.85
+
+// Single shared, evolving simulated account - NOT independent per-signal
+// capital (that was the first Phase 2 draft's known gap). Every position
+// draws from and returns capital to this same pool, the same way a real
+// account's buying power actually works. Starting scale matches the live
+// account's current rough size/settings (2026-07-16) so the sizing math
+// uses real numbers, not arbitrary ones. MARGIN_MULTIPLIER mirrors the
+// live account's ~2x margin configuration.
+const SIM_STARTING_EQUITY = 2000
+const MARGIN_MULTIPLIER = 2
 const SIM_RISK_PCT = 0.10
 const SIM_MIN_EQUITY = 500
 const SIM_MAX_EQUITY = 5000
@@ -84,7 +108,6 @@ interface BacktestLeg extends ProfitTargetRow {
   confidence: number
   entryTimeIso: string
   status: 'open' | 'target_hit' | 'stopped_out' | 'expired'
-  optionPnl: OptionPnlOutcome | null
 }
 
 interface PerSymbolBar {
@@ -163,48 +186,121 @@ const main = async () => {
   const scoredStartMs = new Date(`${start}T00:00:00Z`).getTime()
   const clockBars = intradayCandles.SPY.filter(c => new Date(c.datetime).getTime() >= scoredStartMs)
 
+  // --- Phase 1 state (ungated signal tracking) ---
   const legs: BacktestLeg[] = []
   const openLegsBySymbol: Record<Symbol, BacktestLeg[]> = { SPY: [], QQQ: [], IWM: [] }
   let nextLegId = 1
 
-  // Forward path for the P&L simulator: from the entry bar through the rest
-  // of that same NY trading day (consecutive bars only - stops the instant
-  // the day rolls over, since a 0DTE contract doesn't exist past its own
-  // session's close).
-  const forwardPathFor = (symbol: Symbol, globalIndex: number): PathPoint[] => {
-    const entryDayKey = nyDateKey(intradayCandles[symbol][globalIndex].datetime)
-    const path: PathPoint[] = []
-    for (let i = globalIndex; i < intradayCandles[symbol].length; i++) {
-      const c = intradayCandles[symbol][i]
-      if (nyDateKey(c.datetime) !== entryDayKey) break
-      path.push({ timestamp: c.datetime, close: c.close })
-    }
-    return path
-  }
-
   const makeLeg = (
     ttfStatus: string, symbol: Symbol, direction: 'bullish' | 'bearish', confidence: number,
-    entryTime: Date, entryPrice: number, target50EMA: number, atr: number | null, globalIndex: number
+    entryTime: Date, entryPrice: number, target50EMA: number, atr: number | null
   ): BacktestLeg => {
     const stopLossPrice = stopLossFor(direction, entryPrice, atr)
     const milestones = deriveMilestonePrices(entryPrice, target50EMA)
-
-    const forwardPath = forwardPathFor(symbol, globalIndex)
-    const volWindow = intradayCandles[symbol].slice(Math.max(0, globalIndex - VOL_WINDOW_BARS + 1), globalIndex + 1).map(c => c.close)
-    const volAtEntry = volatilityAt(volWindow)
-    const optionPnl = simulateOptionPnl(direction, target50EMA, forwardPath, volAtEntry, {
-      equity: SIM_EQUITY, buyingPower: SIM_BUYING_POWER, riskPct: SIM_RISK_PCT, minEquity: SIM_MIN_EQUITY, maxEquity: SIM_MAX_EQUITY
-    })
-
     return {
       id: nextLegId++, ttfStatus, symbol, direction, confidence, entryTimeIso: entryTime.toISOString(), status: 'open',
       entry_price: entryPrice, target_50ema_price: target50EMA, stop_loss_price: stopLossPrice,
       milestone_10_price: milestones.milestone10, milestone_10_hit_at: null,
       milestone_20_price: milestones.milestone20, milestone_20_hit_at: null,
       milestone_30_price: milestones.milestone30, milestone_30_hit_at: null,
-      max_favorable_pct: null, target_hit_at: null, stopped_out_at: null,
-      optionPnl
+      max_favorable_pct: null, target_hit_at: null, stopped_out_at: null
     }
+  }
+
+  // --- Phase 2 state (gated, portfolio-aware execution) ---
+  let simEquity = SIM_STARTING_EQUITY
+  let committedCapital = 0
+  const openPositions: SimPosition[] = []
+  const openPositionBySymbolDirection = new Map<string, SimPosition>()
+  const lastCloseTimeBySymbolDirection = new Map<string, string>()
+  const histogramHistoryBySymbol: Record<Symbol, { timeIso: string; histogram: number }[]> = { SPY: [], QQQ: [], IWM: [] }
+  const executedPositions: SimPosition[] = []
+  const skippedByReason = new Map<string, number>()
+  let nextPositionId = 1
+  let peakConcurrentPositions = 0
+
+  const skip = (reason: string) => skippedByReason.set(reason, (skippedByReason.get(reason) ?? 0) + 1)
+
+  // Applies exactly the NEW fills (since previousFillCount) to the shared
+  // account - frees each sold contract's original cost basis back to
+  // buying power and realizes its P&L into equity. Called after every
+  // checkPositionAtBar/closeOpposing call so capital effects land at the
+  // instant they actually happened, not all at once when a position fully
+  // closes (a position can free capital across several tier fills over
+  // time, same as live).
+  const applyFillEffects = (position: SimPosition, previousFillCount: number) => {
+    for (let i = previousFillCount; i < position.fills.length; i++) {
+      const f = position.fills[i]
+      committedCapital -= f.contractsSold * position.entryPremium * 100
+      simEquity += (f.premium - position.entryPremium) * 100 * f.contractsSold
+    }
+  }
+
+  const removeClosedPosition = (position: SimPosition, closedAtIso: string) => {
+    const idx = openPositions.indexOf(position)
+    if (idx >= 0) openPositions.splice(idx, 1)
+    openPositionBySymbolDirection.delete(`${position.symbol}:${position.direction}`)
+    lastCloseTimeBySymbolDirection.set(`${position.symbol}:${position.direction}`, closedAtIso)
+    executedPositions.push(position)
+  }
+
+  const hasMomentumReset = (symbol: Symbol, direction: 'bullish' | 'bearish', sinceIso: string): boolean => {
+    const history = histogramHistoryBySymbol[symbol].filter(h => h.timeIso > sinceIso)
+    if (history.length === 0) return false
+    return direction === 'bullish' ? history.some(h => h.histogram <= 0) : history.some(h => h.histogram >= 0)
+  }
+
+  // Mirrors execute-alerts.ts's real entry gates, in the same order, against
+  // the shared simulated account. Called once per fired leg, right after
+  // Phase 1's ungated makeLeg for the same signal.
+  const attemptGatedEntry = (
+    ttfStatus: string, symbol: Symbol, direction: 'bullish' | 'bearish', confidence: number,
+    entryTime: Date, entryPrice: number, target50EMA: number, globalIndex: number
+  ) => {
+    const t = entryTime.toISOString()
+    const minutesNow = nyMinutesSinceMidnight(entryTime)
+
+    if (minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) return skip('past_force_close')
+    if (confidence < MIN_CONFIDENCE) return skip('below_min_confidence')
+    if (ttfStatus === 'IV' && minutesNow < MARKET_OPEN_MINUTES_ET + IV_ELIGIBLE_AFTER_MINUTES) return skip('iv_too_early')
+
+    const key = `${symbol}:${direction}`
+    if (openPositionBySymbolDirection.has(key)) return skip('same_symbol_direction_open')
+
+    const orbHighConfidenceContinuation = ttfStatus === 'ORB' && confidence >= ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD
+    if ((ttfStatus === 'IV' || ttfStatus === 'ORB') && !orbHighConfidenceContinuation) {
+      const lastClose = lastCloseTimeBySymbolDirection.get(key)
+      if (lastClose && nyDateKey(lastClose) === nyDateKey(t) && !hasMomentumReset(symbol, direction, lastClose)) {
+        return skip('momentum_not_reset')
+      }
+    }
+
+    // Opposing-signal close-all: a fresh signal clearing every gate in the
+    // OPPOSITE direction flattens any open position (any symbol) on the
+    // other side, freeing its capital before this entry is sized.
+    for (const position of [...openPositions]) {
+      if (position.direction === direction) continue
+      const posGi = indexByTime[position.symbol as Symbol].get(t)
+      if (posGi === undefined) continue
+      const posClose = intradayCandles[position.symbol as Symbol][posGi].close
+      const prevFillCount = position.fills.length
+      closeOpposing(position, posClose, t)
+      applyFillEffects(position, prevFillCount)
+      removeClosedPosition(position, t)
+    }
+
+    const volWindow = intradayCandles[symbol].slice(Math.max(0, globalIndex - VOL_WINDOW_BARS + 1), globalIndex + 1).map(c => c.close)
+    const buyingPower = simEquity * MARGIN_MULTIPLIER - committedCapital
+    const priced = priceEntry(direction, entryPrice, target50EMA, t, volWindow, {
+      equity: simEquity, buyingPower, riskPct: SIM_RISK_PCT, minEquity: SIM_MIN_EQUITY, maxEquity: SIM_MAX_EQUITY
+    })
+    if (!priced.ok) return skip(priced.reason)
+
+    const position = openPosition(nextPositionId++, ttfStatus, symbol, direction, priced, t)
+    committedCapital += priced.contracts * priced.entryPremium * 100
+    openPositions.push(position)
+    openPositionBySymbolDirection.set(key, position)
+    peakConcurrentPositions = Math.max(peakConcurrentPositions, openPositions.length)
   }
 
   let barsEvaluated = 0
@@ -214,7 +310,7 @@ const main = async () => {
     const now = new Date(t)
     barsEvaluated++
 
-    // --- 1. Update every currently-open leg against this bar's close, per symbol ---
+    // --- 1a. Update every currently-open leg (Phase 1) against this bar's close ---
     for (const symbol of SYMBOLS) {
       const gi = indexByTime[symbol].get(t)
       if (gi === undefined) continue
@@ -232,6 +328,21 @@ const main = async () => {
       })
     }
 
+    // --- 1b. Update every currently-open position (Phase 2) against this bar's close ---
+    for (const symbol of SYMBOLS) {
+      const gi = indexByTime[symbol].get(t)
+      if (gi === undefined) continue
+      const close = intradayCandles[symbol][gi].close
+
+      for (const position of [...openPositions]) {
+        if (position.symbol !== symbol) continue
+        const prevFillCount = position.fills.length
+        const closed = checkPositionAtBar(position, close, t)
+        applyFillEffects(position, prevFillCount)
+        if (closed) removeClosedPosition(position, t)
+      }
+    }
+
     // --- 2. Compute this bar's per-symbol signal for whichever symbols have data ---
     const perSymbolSignals: PerSymbolBar[] = []
     for (const symbol of SYMBOLS) {
@@ -244,6 +355,16 @@ const main = async () => {
       if (closes.length < 26) continue
 
       const signal = analyzeCandles(closes, MACD_CURL_LOOKBACK_BARS, RSI_DIVERGENCE_LOOKBACK_BARS, HISTOGRAM_DECELERATION_BARS)
+
+      // Histogram history for the momentum-reset gate - tracked regardless
+      // of whether a signal fired this bar, same as live's
+      // indicator_snapshots (recorded every scan, not just on a fire).
+      const macdData = calculateMACD(closes)
+      const latestHistogram = macdData[macdData.length - 1]?.histogram
+      if (latestHistogram !== undefined) {
+        histogramHistoryBySymbol[symbol].push({ timeIso: t, histogram: latestHistogram })
+      }
+
       if (!signal) continue
 
       const atrValues = calculateATR(window.map(c => c.high), window.map(c => c.low), closes, 14)
@@ -293,9 +414,11 @@ const main = async () => {
       })
 
       for (const r of signalResults) {
-        const leg = makeLeg(ttfStatus, r.symbol, r.rsiDivergence as 'bullish' | 'bearish', confidence, now, r.entryPrice, r.target50EMA, r.atr, r.globalIndex)
+        const direction = r.rsiDivergence as 'bullish' | 'bearish'
+        const leg = makeLeg(ttfStatus, r.symbol, direction, confidence, now, r.entryPrice, r.target50EMA, r.atr)
         legs.push(leg)
         openLegsBySymbol[r.symbol].push(leg)
+        attemptGatedEntry(ttfStatus, r.symbol, direction, confidence, now, r.entryPrice, r.target50EMA, r.globalIndex)
       }
     }
 
@@ -322,9 +445,10 @@ const main = async () => {
         })
 
         for (const s of divergent) {
-          const leg = makeLeg('DIV', s.symbol, direction, confidence, now, s.entryPrice, s.target50EMA, s.atr, s.globalIndex)
+          const leg = makeLeg('DIV', s.symbol, direction, confidence, now, s.entryPrice, s.target50EMA, s.atr)
           legs.push(leg)
           openLegsBySymbol[s.symbol].push(leg)
+          attemptGatedEntry('DIV', s.symbol, direction, confidence, now, s.entryPrice, s.target50EMA, s.globalIndex)
         }
       }
     }
@@ -355,9 +479,10 @@ const main = async () => {
         for (const s of directional) {
           const legStop = stopLossFor(direction, s.entryPrice, s.atr)
           const legTarget = continuationTargetPrice(direction, s.entryPrice, legStop)
-          const leg = makeLeg('IV', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr, s.globalIndex)
+          const leg = makeLeg('IV', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr)
           legs.push(leg)
           openLegsBySymbol[s.symbol].push(leg)
+          attemptGatedEntry('IV', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.globalIndex)
         }
       }
     }
@@ -388,29 +513,32 @@ const main = async () => {
         for (const s of candidates) {
           const legStop = stopLossFor(direction, s.entryPrice, s.atr)
           const legTarget = continuationTargetPrice(direction, s.entryPrice, legStop)
-          const leg = makeLeg('ORB', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr, s.globalIndex)
+          const leg = makeLeg('ORB', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr)
           legs.push(leg)
           openLegsBySymbol[s.symbol].push(leg)
+          attemptGatedEntry('ORB', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.globalIndex)
         }
       }
     }
   }
 
   // Anything still open at the end of the backtest window is unresolved -
-  // counted separately, not folded into win rate.
+  // counted separately, not folded into win rate/P&L.
   for (const symbol of SYMBOLS) {
     for (const leg of openLegsBySymbol[symbol]) leg.status = 'open'
   }
+  for (const position of openPositions) executedPositions.push(position) // status stays 'open'
 
-  console.log(`\nEvaluated ${barsEvaluated} bars, generated ${legs.length} legs.\n`)
+  console.log(`\nEvaluated ${barsEvaluated} bars, generated ${legs.length} ungated signal legs (Phase 1).\n`)
 
-  // --- Aggregate and print ---
+  // --- Phase 1: ungated signal-level table ---
   const byType = new Map<string, BacktestLeg[]>()
   for (const leg of legs) {
     if (!byType.has(leg.ttfStatus)) byType.set(leg.ttfStatus, [])
     byType.get(leg.ttfStatus)!.push(leg)
   }
 
+  console.log('--- Phase 1: signal-level (ungated, no entry gates or capital constraints) ---')
   const rows: string[] = []
   rows.push('Type     Legs   TargetHit  StoppedOut  Expired  Open  WinRate  AvgConfidence')
   for (const [type, typeLegs] of [...byType.entries()].sort((a, b) => b[1].length - a[1].length)) {
@@ -425,30 +553,43 @@ const main = async () => {
   }
   console.log(rows.join('\n'))
 
-  // --- Phase 2: approximate option P&L (Black-Scholes model, see
-  // server/backtest/blackScholes.ts's header for what this can and can't
-  // tell you) ---
-  console.log('\n--- Phase 2: approximate option P&L (modeled, not real historical prices) ---')
+  // --- Phase 2: gated, portfolio-aware execution table ---
+  console.log('\n--- Phase 2: gated execution against a shared simulated account (modeled premiums) ---')
+  const byTypeExecuted = new Map<string, SimPosition[]>()
+  for (const position of executedPositions) {
+    if (!byTypeExecuted.has(position.ttfStatus)) byTypeExecuted.set(position.ttfStatus, [])
+    byTypeExecuted.get(position.ttfStatus)!.push(position)
+  }
+
   const pnlRows: string[] = []
-  pnlRows.push('Type     Priced  Skipped  TotalPnL     AvgPnL/leg  WinRate($)')
+  pnlRows.push('Type     Entries  Closed  Open  TotalPnL     AvgPnL/entry  WinRate($)')
   let grandTotalPnl = 0
-  for (const [type, typeLegs] of [...byType.entries()].sort((a, b) => b[1].length - a[1].length)) {
-    const priced = typeLegs.filter((l): l is BacktestLeg & { optionPnl: OptionPnlOutcome & { realizedPnl: number } } =>
-      l.optionPnl !== null && !('skipped' in l.optionPnl))
-    const skipped = typeLegs.length - priced.length
-    const totalPnl = priced.reduce((sum, l) => sum + l.optionPnl.realizedPnl, 0)
-    const avgPnl = priced.length > 0 ? totalPnl / priced.length : 0
-    const winners = priced.filter(l => l.optionPnl.realizedPnl > 0).length
-    const dollarWinRate = priced.length > 0 ? ((winners / priced.length) * 100).toFixed(1) + '%' : '—'
+  for (const [type, positions] of [...byTypeExecuted.entries()].sort((a, b) => b[1].length - a[1].length)) {
+    const closed = positions.filter(p => p.status === 'closed')
+    const open = positions.filter(p => p.status === 'open')
+    const totalPnl = closed.reduce((sum, p) => sum + p.realizedPnl, 0)
+    const avgPnl = closed.length > 0 ? totalPnl / closed.length : 0
+    const winners = closed.filter(p => p.realizedPnl > 0).length
+    const dollarWinRate = closed.length > 0 ? ((winners / closed.length) * 100).toFixed(1) + '%' : '—'
     grandTotalPnl += totalPnl
-    pnlRows.push(`${type.padEnd(8)} ${String(priced.length).padEnd(7)} ${String(skipped).padEnd(8)} $${totalPnl.toFixed(0).padEnd(11)} $${avgPnl.toFixed(0).padEnd(10)} ${dollarWinRate}`)
+    pnlRows.push(`${type.padEnd(8)} ${String(positions.length).padEnd(8)} ${String(closed.length).padEnd(7)} ${String(open.length).padEnd(5)} $${totalPnl.toFixed(0).padEnd(11)} $${avgPnl.toFixed(0).padEnd(12)} ${dollarWinRate}`)
   }
   console.log(pnlRows.join('\n'))
-  console.log(`\nGrand total modeled P&L: $${grandTotalPnl.toFixed(0)} (fixed $${SIM_EQUITY} simulated equity per leg, not compounding/concurrent-aware - see SIM_EQUITY comment)`)
+
+  console.log(`\nTotal entries executed: ${executedPositions.length} | peak concurrent positions: ${peakConcurrentPositions}`)
+  console.log(`Realized P&L: $${grandTotalPnl.toFixed(0)} | Final simulated equity: $${simEquity.toFixed(0)} (started at $${SIM_STARTING_EQUITY})`)
+
+  console.log('\nEntries skipped by gate:')
+  for (const [reason, count] of [...skippedByReason.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${reason}: ${count}`)
+  }
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}.json`
-  writeFileSync(outFile, JSON.stringify({ start, end, barsEvaluated, legs }, null, 1))
+  writeFileSync(outFile, JSON.stringify({
+    start, end, barsEvaluated, legs, executedPositions,
+    summary: { grandTotalPnl, finalEquity: simEquity, peakConcurrentPositions, skippedByReason: Object.fromEntries(skippedByReason) }
+  }, null, 1))
   console.log(`\nFull detail written to ${outFile}`)
 }
 

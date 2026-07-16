@@ -1,152 +1,167 @@
 import { blackScholesPrice, realizedVolatility, RISK_FREE_RATE, ZERO_DTE_IV_MARKUP, OptionType } from './blackScholes.js'
 import { suggestOptionStrike } from '../../src/lib/optionSuggestion.js'
 import {
-  tierPlanFor, computeContractCount, ContractSizeSettings,
+  tierPlanFor, computeContractCount, ContractSizeSettings, TierSpec,
   RUNNER_TARGET_PCT, RUNNER_TIME_LOCK_MIN_PCT, RUNNER_TIME_LOCK_HOUR_ET, RUNNER_TIME_LOCK_MINUTE_ET,
   FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, HARD_STOP_PCT_DEFAULT, BREAKEVEN_PROTECTION_STOP_PCT
 } from '../execution/optionPositionSizing.js'
 import { nyMinutesSinceMidnight } from '../rvol.js'
 
-const MARKET_CLOSE_MINUTES_ET = 16 * 60
+// Incremental, bar-by-bar position model - mirrors monitor-executions.ts's
+// actual per-poll structure (not a pre-resolve-the-whole-future function
+// like the first Phase 2 draft) specifically so an entry-gating layer can
+// interleave real portfolio state (shared capital, dedup, opposing-signal
+// close-all) between bars, the same way live interleaves execute-alerts.ts
+// and monitor-executions.ts as two separate crons touching the same DB
+// rows. See blackScholes.ts's header for what this model can and can't
+// tell you.
+
+export interface SimPosition {
+  id: number
+  ttfStatus: string
+  symbol: string
+  direction: 'bullish' | 'bearish'
+  contractType: OptionType
+  strike: number
+  contracts: number
+  remaining: number
+  entryPremium: number
+  entryTimeIso: string
+  sigma: number
+  stopPct: number
+  tiers: TierSpec[]
+  filledTierCount: number
+  fills: SimulatedFill[]
+  status: 'open' | 'closed'
+  closedAtIso: string | null
+  realizedPnl: number
+}
 
 export interface SimulatedFill {
   atIso: string
   premium: number
   contractsSold: number
-  reason: 'tier' | 'hard_stop' | 'runner_target' | 'runner_time_lock' | 'force_close' | 'end_of_data'
+  reason: 'tier' | 'hard_stop' | 'runner_target' | 'runner_time_lock' | 'force_close' | 'opposing_close'
 }
 
-export interface OptionPnlResult {
-  contractType: OptionType
-  strike: number
-  contracts: number
-  entryPremium: number
-  fills: SimulatedFill[]
-  realizedPnl: number
-}
+export type EntryPriceOutcome =
+  | { ok: true; contractType: OptionType; strike: number; entryPremium: number; contracts: number; sigma: number }
+  | { ok: false; reason: string }
 
-export type OptionPnlOutcome = OptionPnlResult | { skipped: true; reason: string }
-
-export interface PathPoint {
-  timestamp: string
-  close: number
-}
-
-export interface SizingInputs {
-  equity: number
-  buyingPower: number
-  riskPct: number
-  minEquity: number
-  maxEquity: number
-}
-
-// Simulates the REAL tiered exit logic (optionPositionSizing.ts, unchanged
-// from what's live) against a Black-Scholes-modeled premium path instead of
-// a real quote feed. `forwardPath` must start at the entry bar (index 0,
-// used for the entry premium/sizing) and run through the rest of the
-// session - the simulator doesn't fetch anything itself, it's a pure
-// function of whatever price path it's given, same "no lookahead" contract
-// the rest of the backtest already follows (the caller is responsible for
-// not handing it data from beyond the point being evaluated).
-export const simulateOptionPnl = (
+// Entry-time pricing + sizing - same real functions live uses
+// (suggestOptionStrike, computeContractCount), just fed a modeled premium
+// instead of a real quote's ask.
+export const priceEntry = (
   direction: 'bullish' | 'bearish',
+  entryUnderlyingPrice: number,
   targetUnderlyingPrice: number,
-  forwardPath: PathPoint[],
-  volAtEntry: number,
-  sizing: SizingInputs
-): OptionPnlOutcome => {
-  if (forwardPath.length < 2) return { skipped: true, reason: 'insufficient forward path' }
-
-  const entry = forwardPath[0]
-  const entryPrice = entry.close
-  const suggestion = suggestOptionStrike(direction, entryPrice, targetUnderlyingPrice)
+  entryTimeIso: string,
+  trailingCloses: number[],
+  sizing: { equity: number; buyingPower: number; riskPct: number; minEquity: number; maxEquity: number }
+): EntryPriceOutcome => {
+  const suggestion = suggestOptionStrike(direction, entryUnderlyingPrice, targetUnderlyingPrice)
   const contractType: OptionType = direction === 'bullish' ? 'call' : 'put'
   const strike = suggestion.entryStrike
 
-  const sigma = Math.max(volAtEntry, 0.01) * ZERO_DTE_IV_MARKUP
-
-  const minutesToCloseAt = (iso: string) => Math.max(0, MARKET_CLOSE_MINUTES_ET - nyMinutesSinceMidnight(new Date(iso)))
-  const timeToExpiryYears = (iso: string) => minutesToCloseAt(iso) / (60 * 24 * 365)
-
-  const entryPremium = blackScholesPrice(entryPrice, strike, timeToExpiryYears(entry.timestamp), RISK_FREE_RATE, sigma, contractType)
+  const sigma = Math.max(realizedVolatility(trailingCloses), 0.01) * ZERO_DTE_IV_MARKUP
+  const T = minutesToCloseAt(entryTimeIso) / (60 * 24 * 365)
+  const entryPremium = blackScholesPrice(entryUnderlyingPrice, strike, T, RISK_FREE_RATE, sigma, contractType)
 
   const sizeSettings: ContractSizeSettings = { minAccountEquity: sizing.minEquity, maxAccountEquity: sizing.maxEquity }
   const sizeResult = computeContractCount(
     { accountEquity: sizing.equity, buyingPower: sizing.buyingPower, riskPct: sizing.riskPct, premiumAsk: entryPremium },
     sizeSettings
   )
-  if (!sizeResult.ok) return { skipped: true, reason: sizeResult.reason }
+  if (!sizeResult.ok) return { ok: false, reason: sizeResult.reason }
 
-  const contracts = sizeResult.contracts
-  const tiers = tierPlanFor(contracts)
-  const unfilledFixed = tiers.filter(t => !t.isRunner)
-  const runner = tiers.find(t => t.isRunner)
+  return { ok: true, contractType, strike, entryPremium, contracts: sizeResult.contracts, sigma }
+}
 
-  let remaining = contracts
-  let stopPct = HARD_STOP_PCT_DEFAULT
-  let filledTierCount = 0
-  const fills: SimulatedFill[] = []
+const MARKET_CLOSE_MINUTES_ET = 16 * 60
+const minutesToCloseAt = (iso: string) => Math.max(0, MARKET_CLOSE_MINUTES_ET - nyMinutesSinceMidnight(new Date(iso)))
 
-  for (let i = 1; i < forwardPath.length && remaining > 0; i++) {
-    const point = forwardPath[i]
-    const minutesNow = nyMinutesSinceMidnight(new Date(point.timestamp))
-    const pastForceClose = minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET
-    const pastTimeLock = minutesNow >= RUNNER_TIME_LOCK_HOUR_ET * 60 + RUNNER_TIME_LOCK_MINUTE_ET
+export const modeledPremiumAt = (position: Pick<SimPosition, 'strike' | 'contractType' | 'sigma'>, underlyingClose: number, timeIso: string): number => {
+  const T = minutesToCloseAt(timeIso) / (60 * 24 * 365)
+  return blackScholesPrice(underlyingClose, position.strike, T, RISK_FREE_RATE, position.sigma, position.contractType)
+}
 
-    const premium = blackScholesPrice(point.close, strike, timeToExpiryYears(point.timestamp), RISK_FREE_RATE, sigma, contractType)
+export const openPosition = (
+  id: number, ttfStatus: string, symbol: string, direction: 'bullish' | 'bearish', entry: Extract<EntryPriceOutcome, { ok: true }>, entryTimeIso: string
+): SimPosition => ({
+  id, ttfStatus, symbol, direction,
+  contractType: entry.contractType, strike: entry.strike, contracts: entry.contracts, remaining: entry.contracts,
+  entryPremium: entry.entryPremium, entryTimeIso, sigma: entry.sigma, stopPct: HARD_STOP_PCT_DEFAULT,
+  tiers: tierPlanFor(entry.contracts), filledTierCount: 0, fills: [], status: 'open', closedAtIso: null, realizedPnl: 0
+})
 
-    if (pastForceClose) {
-      fills.push({ atIso: point.timestamp, premium, contractsSold: remaining, reason: 'force_close' })
-      remaining = 0
-      break
-    }
+// One bar's worth of position management - the exact same checks
+// monitor-executions.ts runs per poll (force-close, hard stop, tier fills,
+// runner target/time-lock), just against a modeled premium instead of a
+// real quote. Mutates `position` in place and returns whether it closed
+// this bar.
+export const checkPositionAtBar = (position: SimPosition, underlyingClose: number, timeIso: string): boolean => {
+  if (position.status !== 'open') return false
 
-    const adverseMove = (entryPremium - premium) / entryPremium
-    if (adverseMove >= stopPct) {
-      fills.push({ atIso: point.timestamp, premium, contractsSold: remaining, reason: 'hard_stop' })
-      remaining = 0
-      break
-    }
+  const minutesNow = nyMinutesSinceMidnight(new Date(timeIso))
+  const pastForceClose = minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET
+  const pastTimeLock = minutesNow >= RUNNER_TIME_LOCK_HOUR_ET * 60 + RUNNER_TIME_LOCK_MINUTE_ET
+  const premium = modeledPremiumAt(position, underlyingClose, timeIso)
 
-    const currentPct = (premium - entryPremium) / entryPremium
-    let tierFilledThisBar = false
-
-    for (const tier of unfilledFixed.slice(filledTierCount)) {
-      if (currentPct < tier.targetPct) break
-      if (runner && remaining <= 1) break
-
-      fills.push({ atIso: point.timestamp, premium, contractsSold: 1, reason: 'tier' })
-      remaining -= 1
-      filledTierCount++
-      tierFilledThisBar = true
-    }
-
-    if (runner && remaining >= 1 && filledTierCount >= unfilledFixed.length) {
-      const hitTarget = currentPct >= runner.targetPct
-      const timeLockEligible = pastTimeLock && currentPct >= RUNNER_TIME_LOCK_MIN_PCT
-      if (hitTarget || timeLockEligible) {
-        fills.push({ atIso: point.timestamp, premium, contractsSold: remaining, reason: hitTarget ? 'runner_target' : 'runner_time_lock' })
-        remaining = 0
-        break
-      }
-    }
-
-    if (tierFilledThisBar) stopPct = BREAKEVEN_PROTECTION_STOP_PCT
+  if (pastForceClose) {
+    closeAll(position, premium, timeIso, 'force_close')
+    return true
   }
 
-  if (remaining > 0) {
-    // Ran out of forward path data without resolving (e.g. entry very late
-    // in the session) - close it out at the last known modeled premium
-    // rather than leave it dangling, same spirit as a real "still open at
-    // backtest end" leg.
-    const last = forwardPath[forwardPath.length - 1]
-    const premium = blackScholesPrice(last.close, strike, timeToExpiryYears(last.timestamp), RISK_FREE_RATE, sigma, contractType)
-    fills.push({ atIso: last.timestamp, premium, contractsSold: remaining, reason: 'end_of_data' })
+  const adverseMove = (position.entryPremium - premium) / position.entryPremium
+  if (adverseMove >= position.stopPct) {
+    closeAll(position, premium, timeIso, 'hard_stop')
+    return true
   }
 
-  const realizedPnl = fills.reduce((sum, f) => sum + (f.premium - entryPremium) * 100 * f.contractsSold, 0)
+  const currentPct = (premium - position.entryPremium) / position.entryPremium
+  const unfilledFixed = position.tiers.filter(t => !t.isRunner)
+  const runner = position.tiers.find(t => t.isRunner)
+  let tierFilledThisBar = false
 
-  return { contractType, strike, contracts, entryPremium, fills, realizedPnl }
+  for (const tier of unfilledFixed.slice(position.filledTierCount)) {
+    if (currentPct < tier.targetPct) break
+    if (runner && position.remaining <= 1) break
+
+    position.fills.push({ atIso: timeIso, premium, contractsSold: 1, reason: 'tier' })
+    position.remaining -= 1
+    position.filledTierCount++
+    tierFilledThisBar = true
+  }
+
+  if (runner && position.remaining >= 1 && position.filledTierCount >= unfilledFixed.length) {
+    const hitTarget = currentPct >= runner.targetPct
+    const timeLockEligible = pastTimeLock && currentPct >= RUNNER_TIME_LOCK_MIN_PCT
+    if (hitTarget || timeLockEligible) {
+      closeAll(position, premium, timeIso, hitTarget ? 'runner_target' : 'runner_time_lock')
+      return true
+    }
+  }
+
+  if (tierFilledThisBar) position.stopPct = BREAKEVEN_PROTECTION_STOP_PCT
+  return false
+}
+
+// Forced closure independent of the position's own tier/stop/runner state -
+// the opposing-signal close-all (a fresh signal in the other direction
+// clears entry gates while this position is still open).
+export const closeOpposing = (position: SimPosition, underlyingClose: number, timeIso: string): void => {
+  const premium = modeledPremiumAt(position, underlyingClose, timeIso)
+  closeAll(position, premium, timeIso, 'opposing_close')
+}
+
+const closeAll = (position: SimPosition, premium: number, timeIso: string, reason: SimulatedFill['reason']): void => {
+  if (position.remaining > 0) {
+    position.fills.push({ atIso: timeIso, premium, contractsSold: position.remaining, reason })
+  }
+  position.realizedPnl = position.fills.reduce((sum, f) => sum + (f.premium - position.entryPremium) * 100 * f.contractsSold, 0)
+  position.remaining = 0
+  position.status = 'closed'
+  position.closedAtIso = timeIso
 }
 
 export const volatilityAt = (closes: number[]): number => realizedVolatility(closes)
