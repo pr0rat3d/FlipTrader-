@@ -36,9 +36,17 @@ const CHOP_ZONE_END_MINUTES = 13 * 60 + 30
 // Midday (~11:30am-1:30pm ET) is classic chop/whipsaw territory; the first/last
 // 45 minutes of the session tend to have the most genuine volume and follow-
 // through. Mutually exclusive - a given minute is at most one of these.
-export const isChopZone = (now: Date): boolean => {
+// Optional override args default to the live constants above (exact
+// unchanged live behavior when omitted) - added 2026-07-16 so the backtest
+// can test a shifted chop window without touching live behavior. Found
+// live: real 90-day backtest data showed the worst hours were actually
+// 10-11am/11am-12pm (right after the prime-time bonus window ends, before
+// the current chop window even starts at 11:30), while 1-2pm - inside the
+// CURRENT chop window - was the single BEST hour in the dataset. The
+// window may be misaligned with where the real chop actually is.
+export const isChopZone = (now: Date, startMinutes: number = CHOP_ZONE_START_MINUTES, endMinutes: number = CHOP_ZONE_END_MINUTES): boolean => {
   const minutes = nyMinutesSinceMidnight(now)
-  return minutes >= CHOP_ZONE_START_MINUTES && minutes <= CHOP_ZONE_END_MINUTES
+  return minutes >= startMinutes && minutes <= endMinutes
 }
 
 export const isPrimeTime = (now: Date): boolean => {
@@ -63,6 +71,8 @@ export interface ConfidenceModifierInputs {
   // scan-confluence/scan-day-trades/scan-swings) - Finnhub is a separate quota.
   vixChangePct: number | null
   now?: Date
+  chopZoneStartMinutes?: number
+  chopZoneEndMinutes?: number
 }
 
 // Layers three modifiers onto an already-computed base confidence: does the
@@ -95,7 +105,7 @@ export const applyConfidenceModifiers = (baseConfidence: number, inputs: Confide
     confidence *= aligned ? VIX_ALIGNED_MULTIPLIER : VIX_OPPOSED_MULTIPLIER
   }
 
-  if (isChopZone(now)) confidence *= CHOP_ZONE_MULTIPLIER
+  if (isChopZone(now, inputs.chopZoneStartMinutes, inputs.chopZoneEndMinutes)) confidence *= CHOP_ZONE_MULTIPLIER
   else if (isPrimeTime(now)) confidence *= PRIME_TIME_MULTIPLIER
 
   return Math.min(MAX_CONFIDENCE, Math.max(MIN_CONFIDENCE, confidence))

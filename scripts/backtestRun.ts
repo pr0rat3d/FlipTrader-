@@ -171,19 +171,25 @@ const parseArgs = () => {
   const hardStopPct = get('--hard-stop-pct')
   const tierPlanArg = get('--tier-plan') // 'live' (default) or 'fixed-ladder'
   const maxDailyEntries = get('--max-daily-entries')
+  const chopStart = get('--chop-start') // "HH:MM" ET, e.g. "10:00"
+  const chopEnd = get('--chop-end')
+  const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   return {
     start, end,
     hardStopPctOverride: hardStopPct ? parseFloat(hardStopPct) : undefined,
     tierPlanFn: tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan : undefined,
     tierPlanLabel: tierPlanArg === 'fixed-ladder' ? 'fixed-ladder' : 'live',
-    maxDailyEntries: maxDailyEntries ? parseInt(maxDailyEntries, 10) : Infinity
+    maxDailyEntries: maxDailyEntries ? parseInt(maxDailyEntries, 10) : Infinity,
+    chopZoneStartMinutes: chopStart ? toMinutes(chopStart) : undefined,
+    chopZoneEndMinutes: chopEnd ? toMinutes(chopEnd) : undefined,
+    chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
-  console.log(`Strategy: hard-stop=${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}% | tier-plan=${tierPlanLabel} | max-daily-entries=${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries}`)
+  console.log(`Strategy: hard-stop=${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}% | tier-plan=${tierPlanLabel} | max-daily-entries=${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries} | chop-zone=${chopLabel}`)
 
   // Extra lookback before `start` so daily EMA200 and the intraday rolling
   // window both have real history from day 1 of the actual scored range,
@@ -458,7 +464,8 @@ const main = async () => {
         candlestickDirection: patternMatch?.direction ?? null,
         orbBreakoutDirection: orbDirection,
         vixChangePct: null,
-        now
+        now,
+        chopZoneStartMinutes, chopZoneEndMinutes
       })
 
       for (const r of signalResults) {
@@ -489,7 +496,8 @@ const main = async () => {
           candlestickDirection: patternMatch?.direction ?? null,
           orbBreakoutDirection: orbDirection,
           vixChangePct: null,
-          now
+          now,
+          chopZoneStartMinutes, chopZoneEndMinutes
         })
 
         for (const s of divergent) {
@@ -521,7 +529,8 @@ const main = async () => {
           candlestickDirection: patternMatch?.direction ?? null,
           orbBreakoutDirection: orbDirection,
           vixChangePct: null,
-          now
+          now,
+          chopZoneStartMinutes, chopZoneEndMinutes
         })
 
         for (const s of directional) {
@@ -555,7 +564,8 @@ const main = async () => {
           candlestickDirection: patternMatch?.direction ?? null,
           orbBreakoutDirection: null,
           vixChangePct: null,
-          now
+          now,
+          chopZoneStartMinutes, chopZoneEndMinutes
         })
 
         for (const s of candidates) {
