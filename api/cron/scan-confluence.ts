@@ -355,7 +355,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         const representative = directional.find(s => s.symbol === 'SPY') || directional[0]
         const levels = await getSupportResistanceLevels(representative.symbol, representative.candles)
-        const ivResult = detectIVSignal(direction, representative.entryPrice, levels, directional.map(s => s.symbol))
+        const ivResult = detectIVSignal(direction, representative.entryPrice, levels, directional.map(s => s.symbol), representative.candles)
 
         if (!ivResult) continue
 

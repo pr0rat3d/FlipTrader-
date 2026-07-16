@@ -174,6 +174,25 @@ const hybridRunner5TierPlan = (contracts: number): TierSpec[] => {
   return contracts === 5 ? [...fixed, { tierNumber: RUNNER_TIER_NUMBER, isRunner: true, targetPct: RUNNER_TARGET_PCT }] : fixed
 }
 
+// "Scalper" plan proposed 2026-07-16, after live's tier-fill mechanism moved
+// to resting broker-side limit orders (each tier gets its own real order at
+// entry - see execute-alerts.ts/monitor-executions.ts) but SPY/QQQ calls
+// still ran up well past their old 10/20/30% tiers and reversed all the way
+// into the hard stop, netting a loss on trades that were profitable
+// mid-flight. Hypothesis: much tighter, closer-together tiers (5-point
+// steps instead of 10) bank real profit sooner and more often, treating
+// this like a scalper's market rather than a swing/runner one. No runner at
+// any contract count - always fully exits by the last tier, same spirit as
+// fixed-ladder above. NOT live - opt-in via --tier-plan scalper.
+const SCALPER_LADDER_PCTS: Record<number, number[]> = {
+  2: [0.10, 0.15],
+  3: [0.10, 0.15, 0.20],
+  4: [0.10, 0.15, 0.20, 0.25],
+  5: [0.10, 0.15, 0.20, 0.25, 0.30]
+}
+const scalperLadderTierPlan = (contracts: number): TierSpec[] =>
+  (SCALPER_LADDER_PCTS[contracts] ?? []).map((targetPct, i) => ({ tierNumber: i + 1, isRunner: false, targetPct }))
+
 const parseArgs = () => {
   const args = process.argv.slice(2)
   const get = (flag: string): string | undefined => {
@@ -188,13 +207,14 @@ const parseArgs = () => {
     return d.toISOString().slice(0, 10)
   })()
   const hardStopPct = get('--hard-stop-pct')
-  const tierPlanArg = get('--tier-plan') // 'live' (default), 'fixed-ladder', or 'hybrid-runner5'
+  const tierPlanArg = get('--tier-plan') // 'live' (default), 'fixed-ladder', 'hybrid-runner5', or 'scalper'
   const maxDailyEntries = get('--max-daily-entries')
   const chopStart = get('--chop-start') // "HH:MM" ET, e.g. "10:00"
   const chopEnd = get('--chop-end')
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
+    : tierPlanArg === 'scalper' ? scalperLadderTierPlan
     : undefined
   return {
     start, end,
@@ -539,7 +559,7 @@ const main = async () => {
 
         const representative = directional.find(s => s.symbol === 'SPY') || directional[0]
         const levels = supportResistanceLevelsAsOf(dailyCandles[representative.symbol], dailyAsOf(representative.symbol), representative.sessionCandlesSoFar)
-        const ivResult = detectIVSignal(direction, representative.entryPrice, levels, directional.map(s => s.symbol))
+        const ivResult = detectIVSignal(direction, representative.entryPrice, levels, directional.map(s => s.symbol), representative.sessionCandlesSoFar)
         if (!ivResult) continue
 
         const patternMatch = detectCandlestickPattern(representative.sessionCandlesSoFar)

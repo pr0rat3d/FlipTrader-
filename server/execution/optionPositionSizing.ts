@@ -1,18 +1,25 @@
 // Contract count drives which scale-out tier plan applies (not a fixed
 // 30/30/30/10 split like the old shares model) - each count from 2-5 has its
-// own explicit ladder, matched to how far the runner needs to be able to run.
+// own explicit ladder.
 //
-// 2 contracts is the one exception with no runner at all: too small a
-// position to dedicate a whole contract to an open-ended +100% ride. Both
-// contracts fully exit by +30% at the latest - tier 1 at +15%, tier 2 at
-// +30% - with contract 2 protected at breakeven the moment tier 1 fires
-// (the existing stop_pct-ratchet-to-0-on-any-tier-fill behavior in
-// monitor-executions.ts already covers this, no separate mechanism needed).
+// Tight 5-point-step "scalper" ladder, no runner at any contract count -
+// replaced the wider 10/20/30(+100% runner) plan live 2026-07-16, after a
+// 90-day walk-forward backtest (run on the SAME window, same hard stop,
+// same entry gates - the only variable changed was this tier spacing) swung
+// the result from -$1,508 to +$3,139. Found live 2026-07-15/16: SPY/QQQ
+// calls repeatedly ran up well past the old wider tiers and reversed all
+// the way into the hard stop before the runner's open-ended +100% target
+// (or even the earlier fixed tiers, which were spaced too far apart to bank
+// much before the reversal) ever paid out - this is a 0DTE 0-day book, not
+// a swing book, and the backtest confirms banking real profit sooner and
+// more often beats holding for a bigger, rarer move. No runner means every
+// contract fully exits by the ladder's last step every time - see
+// tierPlanFor below.
 const TIER_PLANS: Record<number, { pcts: number[]; hasRunner: boolean }> = {
-  2: { pcts: [0.15, 0.30], hasRunner: false },
-  3: { pcts: [0.10, 0.20], hasRunner: true },
-  4: { pcts: [0.10, 0.20, 0.30], hasRunner: true },
-  5: { pcts: [0.10, 0.20, 0.30, 0.50], hasRunner: true }
+  2: { pcts: [0.10, 0.15], hasRunner: false },
+  3: { pcts: [0.10, 0.15, 0.20], hasRunner: false },
+  4: { pcts: [0.10, 0.15, 0.20, 0.25], hasRunner: false },
+  5: { pcts: [0.10, 0.15, 0.20, 0.25, 0.30], hasRunner: false }
 }
 
 export const RUNNER_TIER_NUMBER = 99

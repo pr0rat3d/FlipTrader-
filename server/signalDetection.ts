@@ -1,4 +1,5 @@
 import { SupportResistanceLevels } from './supportResistance.js'
+import { Candle } from './twelvedata.js'
 
 export type ConfluenceType = 'pdh_rejection' | 'pdl_bounce' | 'or_rejection' | 'gap_fill_target'
 
@@ -15,14 +16,56 @@ const isNear = (price: number, target: number | null, tolerance: number): boolea
   return Math.abs(price - target) / target <= tolerance
 }
 
+// How close a candle's own low/high must get to the level to count as an
+// actual test of it - much tighter than DEFAULT_TOLERANCE, which only
+// screens whether the CURRENT price is loosely in the neighborhood.
+const TOUCH_TOLERANCE = 0.0015 // 0.15%
+const TOUCH_LOOKBACK_BARS = 6 // ~30min on the 5-min bars both live and the backtest use
+// Current price must have moved back past the level by more than this to
+// count as a genuine reclaim, not just noise sitting exactly on it.
+const RECLAIM_MARGIN = 0.0005 // 0.05%
+
+// Confirms the level was actually tested recently (a candle's low/high
+// pierced or came within TOUCH_TOLERANCE of it) AND price has since moved
+// back to the favorable side of it - a real bounce/rejection, not just
+// "currently somewhere nearby." Found live 2026-07-15/16: the old
+// proximity-only isNear check fired pdl_bounce whenever price sat anywhere
+// in a wide ~1%-of-price band around PDL (e.g. $7.50 wide on a $750 stock),
+// with no requirement that a bounce was actually happening, and no
+// requirement price had even reclaimed the level yet. 22 of the last 24
+// pdl_bounce trades stopped out regardless of confidence (0.78-0.98) -
+// confidence tracked zero correlation with outcome, consistent with the
+// model having no real signal to be confident about. Today's 3 stopped-out
+// entries fired with price still $2-2.50 ABOVE PDL, then just kept
+// drifting down through the wide proximity band into the stop - the level
+// was never actually tested at all.
+const testedAndReclaimed = (candles: Candle[], level: number | null, currentPrice: number, side: 'low' | 'high'): boolean => {
+  if (level === null) return false
+  const recent = candles.slice(-TOUCH_LOOKBACK_BARS)
+  const tested = recent.some(c => side === 'low'
+    ? c.low <= level * (1 + TOUCH_TOLERANCE)
+    : c.high >= level * (1 - TOUCH_TOLERANCE))
+  if (!tested) return false
+  return side === 'low' ? currentPrice > level * (1 + RECLAIM_MARGIN) : currentPrice < level * (1 - RECLAIM_MARGIN)
+}
+
 // Early momentum signal: MACD curl + price sitting at a support/resistance level,
 // with no RSI divergence required (that's what makes it "earlier" than TTTF/DTTF/STTF).
 // Requires 2+ indices sharing the same MACD curl direction.
+//
+// `candles` is the representative symbol's session-so-far candles (same data
+// already passed to detectORBBreakout/detectCandlestickPattern by both
+// callers) - used only by pdl_bounce/pdh_rejection's touch-and-reclaim
+// check. or_rejection and gap_fill_target keep the original proximity-only
+// check: they're a different thesis (retesting today's own opening range,
+// or reaching a gap-fill target) with no real-trade history yet to suggest
+// the same fix is needed there.
 export const detectIVSignal = (
   direction: 'bullish' | 'bearish',
   currentPrice: number,
   levels: SupportResistanceLevels,
   indicesTriggered: string[],
+  candles: Candle[],
   tolerance: number = DEFAULT_TOLERANCE
 ): IVSignalResult | null => {
   if (indicesTriggered.length < 2) return null
@@ -32,10 +75,10 @@ export const detectIVSignal = (
   let confidence = 0
 
   if (direction === 'bullish') {
-    if (isNear(currentPrice, levels.pdl, tolerance)) {
+    if (testedAndReclaimed(candles, levels.pdl, currentPrice, 'low')) {
       confluenceType = 'pdl_bounce'
       confluenceLevel = levels.pdl
-      confidence = 0.85 // Strong: bouncing off PDL with bullish MACD
+      confidence = 0.85 // Strong: confirmed bounce off PDL with bullish MACD
     } else if (isNear(currentPrice, levels.orl, tolerance)) {
       confluenceType = 'or_rejection'
       confluenceLevel = levels.orl
@@ -46,10 +89,10 @@ export const detectIVSignal = (
       confidence = 0.65 // Weaker: gap fill candidate
     }
   } else {
-    if (isNear(currentPrice, levels.pdh, tolerance)) {
+    if (testedAndReclaimed(candles, levels.pdh, currentPrice, 'high')) {
       confluenceType = 'pdh_rejection'
       confluenceLevel = levels.pdh
-      confidence = 0.85 // Strong: rejecting from PDH with bearish MACD
+      confidence = 0.85 // Strong: confirmed rejection from PDH with bearish MACD
     } else if (isNear(currentPrice, levels.orh, tolerance)) {
       confluenceType = 'or_rejection'
       confluenceLevel = levels.orh
