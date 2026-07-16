@@ -5,14 +5,21 @@ import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { applyPriceSample, checkExpiry } from '../../server/alertOutcomes.js'
 
 // cron-job.org's free tier has no sub-minute scheduling option, so this still gets
-// triggered once a minute externally - but loops internally to get an effective
-// ~18s checking cadence within that single invocation instead of only checking
-// once. 3 checks x 18s gaps = ~36s elapsed, comfortably under the 60s maxDuration
-// requested below. Each open position costs 1 Finnhub call per check; even at 3x
-// the previous call volume this stays far under Finnhub's 60 calls/min free tier
-// for any realistic number of open positions.
-const CHECK_INTERVAL_MS = 18_000
-const CHECKS_PER_INVOCATION = 3
+// triggered once a minute externally - but loops internally to get a faster
+// effective checking cadence within that single invocation instead of only
+// checking once. Originally 3 checks x 18s gaps (~36s elapsed) - found live
+// 2026-07-16 that this was long enough to blow past cron-job.org's own
+// client-side request timeout on their free tier (well under 30s), showing
+// up as "failed/timeout" in their job history even though the Vercel
+// function itself completed successfully every time (server-side execution
+// isn't tied to the caller staying connected). The real risk wasn't lost
+// work, it was cron-job.org retrying a "failed" job while the first
+// invocation was still finishing - two overlapping runs racing each other.
+// Tightened to comfortably clear a conservative timeout margin. Each open
+// position still costs 1 Finnhub call per check, far under Finnhub's 60
+// calls/min free tier at this volume.
+const CHECK_INTERVAL_MS = 6_000
+const CHECKS_PER_INVOCATION = 2
 
 // Requests the maximum execution time Vercel allows so the loop above isn't cut
 // short mid-cycle.

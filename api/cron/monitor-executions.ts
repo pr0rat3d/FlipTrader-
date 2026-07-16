@@ -16,18 +16,29 @@ export const config = {
 }
 
 // cron-job.org's free tier has no sub-minute scheduling option, so this still
-// gets triggered once a minute externally - but loops internally for an
-// effective ~18s checking cadence within one invocation, same pattern
-// track-profit-targets.ts already uses. Previously had NO internal loop at
+// gets triggered once a minute externally - but loops internally for a
+// faster checking cadence within one invocation, same pattern
+// track-profit-targets.ts already uses. Originally had NO internal loop at
 // all (a single check per ~60s external trigger) - found live 2026-07-15
-// that this mattered: a stop/breakeven trigger could sit up to a minute
-// behind a fast-moving 0DTE option before the next external trigger even
-// noticed (QQQ 715C's breakeven stop fired at "5.1% adverse," not the
-// intended ~0%, because price had already drifted that far in the gap
-// between checks). 3 checks x 18s gaps = ~36s elapsed, comfortably under the
-// 60s maxDuration below.
-const CHECK_INTERVAL_MS = 18_000
-const CHECKS_PER_INVOCATION = 3
+// that this mattered for the (then bot-polled) hard stop: a trigger could
+// sit up to a minute behind a fast-moving 0DTE option before the next
+// external trigger even noticed. Added a 3-checks/18s-gaps loop the same
+// day, but found live 2026-07-16 that the resulting ~36s response time was
+// long enough to blow past cron-job.org's own client-side request timeout
+// (well under 30s on their free tier) - showing up as "failed/timeout" in
+// their job history even though the Vercel function completed successfully
+// every time. The real risk wasn't lost work, it was cron-job.org retrying
+// a "failed" job while the first invocation was still finishing - two
+// overlapping runs racing each other (e.g. a duplicate tier sell, or a
+// cancel/replace race on the resting stop order).
+//
+// Tightened significantly, and it's safe to: the hard stop's own real-time
+// protection now runs on Alpaca's resting stop order (2026-07-16), not this
+// poll's cadence at all - a slower poll here only affects how quickly tier
+// fills/runner targets/stop-order-fill bookkeeping get noticed, not whether
+// a fast adverse move gets caught.
+const CHECK_INTERVAL_MS = 6_000
+const CHECKS_PER_INVOCATION = 2
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
