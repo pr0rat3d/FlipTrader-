@@ -4,10 +4,10 @@ import { getTierColor, getTierLabel } from '../lib/alerts'
 import { Alert, ProfitTarget } from '../types'
 import { fmt, timeLabel } from './charts/ChartPrimitives'
 
-const TIERS: Array<'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB'> = ['TTTF', 'DTTF', 'STTF', 'IV', 'ORB']
+const TIERS: Array<'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB' | 'DIV'> = ['TTTF', 'DTTF', 'STTF', 'DIV', 'IV', 'ORB']
 
 interface TierStats {
-  tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB'
+  tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB' | 'DIV'
   totalLegs: number
   resolvedLegs: number
   targetHit: number
@@ -20,7 +20,7 @@ interface TierStats {
   avgMaxFavorablePct: number | null
 }
 
-const computeTierStats = (tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB', legs: ProfitTarget[]): TierStats => {
+const computeTierStats = (tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB' | 'DIV', legs: ProfitTarget[]): TierStats => {
   const totalLegs = legs.length
   const targetHit = legs.filter(l => l.status === 'target_hit').length
   const expired = legs.filter(l => l.status === 'expired').length
@@ -231,7 +231,7 @@ export const Performance: React.FC = () => {
   }, [])
 
   const alertTierById = useMemo(() => {
-    const map = new Map<string, 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB'>()
+    const map = new Map<string, 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB' | 'DIV'>()
     for (const alert of alerts) map.set(alert.id, alert.ttf_status)
     return map
   }, [alerts])

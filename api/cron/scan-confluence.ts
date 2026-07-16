@@ -31,6 +31,23 @@ const VIX_PROXY_SYMBOL = 'VIXY'
 // genuinely multi-day-stale cross still doesn't count as "recent."
 const MACD_CURL_LOOKBACK_BARS = 30
 
+// How far back an RSI divergence can be and still count, mirroring
+// MACD_CURL_LOOKBACK_BARS above but deliberately much smaller - a
+// divergence is a specific price-extreme EVENT (a bar where price hit a
+// new high/low that RSI didn't confirm), not a durable state like "MACD is
+// still on the bullish side of its signal line." By the time several bars
+// have passed, price has usually already moved on and invalidated the
+// setup the divergence pointed at. 5 bars on 5-min candles = ~25 min -
+// comfortably covers the ~12-minute divergence-to-MACD-cross gap found
+// live 2026-07-15 (SPY: divergence at 2:36pm ET, cross at 2:48pm) with
+// some margin, without going stale.
+const RSI_DIVERGENCE_LOOKBACK_BARS = 5
+
+// How many consecutive shrinking-toward-zero histogram bars
+// detectHistogramDeceleration requires before calling it a real turn
+// rather than single-bar noise. 3 bars = ~15 min of sustained deceleration.
+const HISTOGRAM_DECELERATION_BARS = 3
+
 // Stop-loss = entry price minus (bullish) or plus (bearish) 1.5x ATR - a common
 // day-trading default, not load-bearing anywhere downstream, easy to tune.
 const ATR_STOP_MULTIPLIER = 1.5
@@ -70,6 +87,7 @@ interface PerSymbolSignal {
   symbol: string
   rsiDivergence: string | null
   macdCurl: string | null
+  histogramDeceleration: string | null
   entryPrice: number
   target50EMA: number
   atr: number | null
@@ -124,7 +142,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // "since today's open" reset can never see regardless of how far into
       // the current session it gets. A fixed trailing-bar count that rolls
       // forward continuously (no reset) catches both cases.
-      const signal = analyzeCandles(closes, MACD_CURL_LOOKBACK_BARS)
+      const signal = analyzeCandles(closes, MACD_CURL_LOOKBACK_BARS, RSI_DIVERGENCE_LOOKBACK_BARS, HISTOGRAM_DECELERATION_BARS)
 
       if (signal) {
         const atrValues = calculateATR(candles.map(c => c.high), candles.map(c => c.low), closes, 14)
@@ -132,6 +150,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           symbol,
           rsiDivergence: signal.rsiDivergence,
           macdCurl: signal.macdCurl,
+          histogramDeceleration: signal.histogramDeceleration,
           entryPrice: signal.entryPrice,
           target50EMA: signal.target50EMA,
           atr: atrValues[atrValues.length - 1] ?? null,
@@ -220,6 +239,105 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             `${ttfStatus} Alert: ${triggeredIndices.join('/')}`,
             `${representative.rsiDivergence === 'bullish' ? 'Bullish' : 'Bearish'} reversal - ${legLines}`
           )
+        }
+      }
+    }
+
+    // DIV (Divergence, pre-confirmation): RSI divergence (now with the same
+    // trailing-lookback grace MACD's curl already has) confirmed by histogram
+    // DECELERATION rather than a confirmed MACD cross - catches a reversal at
+    // the moment the divergence itself appears, instead of waiting the extra
+    // several bars a real crossover can take to arrive (see
+    // RSI_DIVERGENCE_LOOKBACK_BARS above for the live case this was built
+    // for). Deliberately a SEPARATE, lower-confidence tier rather than folded
+    // into TTTF/DTTF/STTF's own confidence - a real crossover is still
+    // stronger evidence than deceleration alone, and "TTTF fired" should keep
+    // meaning "a crossover actually happened," not "probably about to."
+    // Reversal thesis like full confluence (not a continuation play like
+    // IV/ORB), so it targets the raw 50 EMA the same way full confluence
+    // does, not continuationTargetPrice. Not suppressed by IV/ORB firing in
+    // the same run (or vice versa) - each tests independent conditions - but
+    // still suppressed by full confluence itself, since a real crossover
+    // already happening supersedes a "crossover coming soon" read on the
+    // same move.
+    let divFired: string | null = null
+
+    if (!fullConfluenceFired) {
+      for (const direction of ['bullish', 'bearish'] as const) {
+        const divergent = perSymbolSignals.filter(s => s.rsiDivergence === direction && s.histogramDeceleration === direction)
+        if (divergent.length < 1) continue
+
+        const representative = divergent.find(s => s.symbol === 'SPY') || divergent[0]
+        const divIndices = divergent.map(s => s.symbol)
+        const entryTime = new Date()
+
+        const dailyLevels = await getDailyLevels(representative.symbol)
+        const patternMatch = detectCandlestickPattern(representative.candles)
+        const openingRange = calculateOpeningRange(representative.candles)
+        const orbDirection = detectORBBreakout(representative.candles, openingRange?.orh ?? null, openingRange?.orl ?? null)
+        // Scales with index-count agreement same as every other tier here,
+        // but pinned BELOW the matching full-confluence tier at every count
+        // (0.80/0.65/0.50 vs TTTF/DTTF/STTF's 0.95/0.75/0.55) - less
+        // confirmed evidence should never outscore more confirmed evidence
+        // for the same index count.
+        const baseConfidence = divIndices.length === 3 ? 0.80 : divIndices.length === 2 ? 0.65 : 0.50
+        const confidence = applyConfidenceModifiers(baseConfidence, {
+          direction,
+          dailyEma50: dailyLevels?.dailyEma50 ?? null,
+          dailyEma200: dailyLevels?.dailyEma200 ?? null,
+          candlestickDirection: patternMatch?.direction ?? null,
+          orbBreakoutDirection: orbDirection,
+          vixChangePct,
+          now: entryTime
+        })
+
+        const { data, error } = await supabase
+          .from('day_trade_alerts')
+          .insert({
+            symbol: divIndices.join('/'),
+            ttf_status: 'DIV',
+            rsi_divergence: direction,
+            macd_curl: direction,
+            indices_triggered: divIndices,
+            entry_price: representative.entryPrice,
+            entry_time: entryTime,
+            target_50ema: representative.target50EMA,
+            confidence,
+            stop_loss_price: stopLossFor(direction, representative.entryPrice, representative.atr),
+            orb_breakout_direction: orbDirection,
+            timestamp: entryTime
+          })
+          .select()
+
+        if (error) throw error
+
+        if (data && data[0]) {
+          await supabase.from('profit_targets').insert(
+            divergent.map(s => {
+              const milestones = deriveMilestonePrices(s.entryPrice, s.target50EMA)
+              return {
+                day_trade_alert_id: data[0].id,
+                symbol: s.symbol,
+                entry_price: s.entryPrice,
+                entry_time: entryTime,
+                target_50ema_price: s.target50EMA,
+                stop_loss_price: stopLossFor(direction, s.entryPrice, s.atr),
+                milestone_10_price: milestones.milestone10,
+                milestone_20_price: milestones.milestone20,
+                milestone_30_price: milestones.milestone30
+              }
+            })
+          )
+
+          divFired = direction
+
+          if (confidence >= NOTIFICATION_CONFIDENCE_THRESHOLD) {
+            await sendToTopic(
+              ALERTS_TOPIC,
+              `DIV Alert: ${divIndices.join('/')}`,
+              `${direction === 'bullish' ? 'Bullish' : 'Bearish'} divergence, MACD turning but not yet crossed - ${representative.symbol} $${representative.entryPrice.toFixed(2)}`
+            )
+          }
         }
       }
     }
@@ -426,7 +544,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, ivFired, orbFired })
+    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, divFired, ivFired, orbFired })
   } catch (error) {
     console.error('Error in scan-confluence:', error)
     res.status(500).json({ error: String(error) })

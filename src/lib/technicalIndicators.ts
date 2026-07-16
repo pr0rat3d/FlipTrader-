@@ -32,7 +32,21 @@ export const calculateEMA = (closes: number[], period: number): number => {
   return ema
 }
 
-export const detectRSIDivergence = (closes: number[], rsiValues: number[]): 'bullish' | 'bearish' | null => {
+// `scanLookback` controls how many recent bars are checked for a divergence
+// condition, not just the current bar - mirrors detectMACDCurl's `lookback`
+// param and exists for the same reason: the confirming indicator (a real
+// MACD crossover) is inherently the LATER of the two events, since the
+// histogram has to fully collapse through zero first. Found live
+// 2026-07-15: SPY's divergence condition was true at 2:36pm ET (a marginal
+// new price high with RSI below its own recent peak), but MACD didn't
+// actually cross until 2:48pm - by which point price was no longer at a
+// new high, so the divergence condition (checked only on the current bar)
+// had already gone false again too. TTF/DTF/STF's `rsiDivergence ===
+// macdCurl` same-bar requirement never had a chance to see both conditions
+// true at once. Scans newest-to-oldest so a more recent divergence
+// correctly wins over a stale one further back. Defaults to 1 (exact
+// current-bar-only) so any other caller keeps the old strict behavior.
+export const detectRSIDivergence = (closes: number[], rsiValues: number[], scanLookback: number = 1): 'bullish' | 'bearish' | null => {
   // RSI.calculate() returns fewer values than the input closes (a `period`-bar
   // warmup with no output) - closes and rsiValues are NOT index-aligned. Both
   // arrays' last element represents "now," so trim closes to rsiValues' length
@@ -42,32 +56,71 @@ export const detectRSIDivergence = (closes: number[], rsiValues: number[]): 'bul
   const alignedCloses = closes.slice(offset)
 
   const n = alignedCloses.length - 1
-  const lookback = Math.min(10, n)
-  if (lookback < 3) return null
+  const earliest = Math.max(0, n - scanLookback + 1)
 
-  // Compares the CURRENT bar against the extreme of the bars BEFORE it,
-  // excluding itself. The previous version included the current bar in the
-  // window it compared against, which made the price condition mathematically
-  // impossible to satisfy (verified empirically: 2000 random-walk trials, zero
-  // non-null results) - this is why no TTF/DTF/STF alert had ever fired.
-  const priorCloses = alignedCloses.slice(n - lookback, n)
-  const priorRSI = rsiValues.slice(n - lookback, n)
+  for (let i = n; i >= earliest; i--) {
+    // Compares bar `i` against the extreme of the bars BEFORE it, excluding
+    // itself. The original version included the current bar in the window
+    // it compared against, which made the price condition mathematically
+    // impossible to satisfy (verified empirically: 2000 random-walk trials,
+    // zero non-null results) - this is why no TTF/DTF/STF alert had ever
+    // fired before that fix.
+    const priorWindow = Math.min(10, i)
+    if (priorWindow < 3) continue
 
-  const priorLow = Math.min(...priorCloses)
-  const priorHigh = Math.max(...priorCloses)
-  const priorRSILow = Math.min(...priorRSI)
-  const priorRSIHigh = Math.max(...priorRSI)
+    const priorCloses = alignedCloses.slice(i - priorWindow, i)
+    const priorRSI = rsiValues.slice(i - priorWindow, i)
 
-  // Bullish divergence: price makes a new low vs. the recent window, but RSI
-  // does NOT confirm with a new low - momentum weakening despite the drop.
-  if (alignedCloses[n] < priorLow && rsiValues[n] > priorRSILow) {
-    return 'bullish'
+    const priorLow = Math.min(...priorCloses)
+    const priorHigh = Math.max(...priorCloses)
+    const priorRSILow = Math.min(...priorRSI)
+    const priorRSIHigh = Math.max(...priorRSI)
+
+    // Bullish divergence: price makes a new low vs. the recent window, but RSI
+    // does NOT confirm with a new low - momentum weakening despite the drop.
+    if (alignedCloses[i] < priorLow && rsiValues[i] > priorRSILow) {
+      return 'bullish'
+    }
+
+    // Bearish divergence: price makes a new high vs. the recent window, but RSI
+    // does NOT confirm with a new high - momentum weakening despite the rise.
+    if (alignedCloses[i] > priorHigh && rsiValues[i] < priorRSIHigh) {
+      return 'bearish'
+    }
   }
 
-  // Bearish divergence: price makes a new high vs. the recent window, but RSI
-  // does NOT confirm with a new high - momentum weakening despite the rise.
-  if (alignedCloses[n] > priorHigh && rsiValues[n] < priorRSIHigh) {
+  return null
+}
+
+// Catches momentum turning over BEFORE the actual MACD crossover -
+// detectMACDCurl's crossover is inherently the LATER of the two events,
+// since the histogram has to fully collapse through zero first. A visible
+// deceleration (the histogram shrinking toward zero for several
+// consecutive bars, without having crossed yet) is an earlier, less
+// certain tell - `bars` consecutive shrinking readings are required so
+// ordinary single-bar noise doesn't read as a real turn.
+export const detectHistogramDeceleration = (macdData: { histogram?: number }[], bars: number = 3): 'bullish' | 'bearish' | null => {
+  if (macdData.length < bars + 1) return null
+
+  const recent = macdData.slice(-(bars + 1)).map(d => d.histogram)
+  if (recent.some(h => h === undefined)) return null
+  const values = recent as number[]
+  const current = values[values.length - 1]
+
+  if (current > 0) {
+    // Positive and shrinking toward zero every bar - anticipates a bearish cross.
+    for (let i = 1; i < values.length; i++) {
+      if (values[i] >= values[i - 1]) return null
+    }
     return 'bearish'
+  }
+
+  if (current < 0) {
+    // Negative and growing toward zero every bar - anticipates a bullish cross.
+    for (let i = 1; i < values.length; i++) {
+      if (values[i] <= values[i - 1]) return null
+    }
+    return 'bullish'
   }
 
   return null

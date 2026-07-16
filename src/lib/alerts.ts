@@ -9,18 +9,20 @@ export const tierAlert = (indicesTriggered: string[]): 'TTTF' | 'DTTF' | 'STTF' 
   return 'STTF'
 }
 
-export const getTierColor = (tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB'): string => {
+export const getTierColor = (tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB' | 'DIV'): string => {
   if (tier === 'TTTF') return '#10b981' // green
   if (tier === 'DTTF') return '#f59e0b' // yellow
   if (tier === 'IV') return '#8b5cf6' // purple - early momentum, distinct from confluence tiers
   if (tier === 'ORB') return '#3b82f6' // blue - breakout continuation, distinct from all the others
+  if (tier === 'DIV') return '#ec4899' // pink - divergence pre-confirmation, distinct from everything above
   return '#ef4444' // red (STTF)
 }
 
-export const getTierLabel = (tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB'): string => {
+export const getTierLabel = (tier: 'TTTF' | 'DTTF' | 'STTF' | 'IV' | 'ORB' | 'DIV'): string => {
   if (tier === 'TTTF') return 'Triple - Strong'
   if (tier === 'DTTF') return 'Double - Good'
   if (tier === 'IV') return 'Momentum Entry'
   if (tier === 'ORB') return 'Breakout Continuation'
+  if (tier === 'DIV') return 'Early Divergence'
   return 'Single - Weak'
 }

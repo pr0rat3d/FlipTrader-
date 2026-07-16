@@ -1,10 +1,11 @@
-import { calculateRSI, calculateMACD, detectRSIDivergence, detectMACDCurl, calculateEMA } from '../src/lib/technicalIndicators.js'
+import { calculateRSI, calculateMACD, detectRSIDivergence, detectMACDCurl, detectHistogramDeceleration, calculateEMA } from '../src/lib/technicalIndicators.js'
 
 export interface SignalResult {
   symbol: string
   timeframe: string
   rsiDivergence: 'bullish' | 'bearish' | null
   macdCurl: 'bullish' | 'bearish' | null
+  histogramDeceleration: 'bullish' | 'bearish' | null
   hasSignal: boolean
   entryPrice: number
   target50EMA: number
@@ -28,15 +29,23 @@ export interface SignalResult {
 // hours of every single session (until today's bar count exceeded 25),
 // which is exactly when this was caught: alerts were unexpectedly sparse
 // all morning on a day IWM had a genuine, sustained ORB breakout.
-export const analyzeCandles = (closes: number[], macdLookback: number = 1): SignalResult | null => {
+// rsiLookback: same trailing-count meaning as macdLookback, applied to
+// detectRSIDivergence instead - see that function's comment for why this
+// exists (a real crossover confirming an RSI divergence often arrives a
+// few bars after the divergence itself, by which point the divergence's
+// own current-bar-only check would already be stale).
+// decelerationBars: how many consecutive shrinking-toward-zero histogram
+// readings detectHistogramDeceleration requires before calling a turn.
+export const analyzeCandles = (closes: number[], macdLookback: number = 1, rsiLookback: number = 1, decelerationBars: number = 3): SignalResult | null => {
   if (closes.length < 26) return null
 
   try {
     const rsiValues = calculateRSI(closes, 14)
     const macdData = calculateMACD(closes)
 
-    const rsiDivergence = detectRSIDivergence(closes, rsiValues)
+    const rsiDivergence = detectRSIDivergence(closes, rsiValues, rsiLookback)
     const macdCurl = detectMACDCurl(macdData, macdLookback)
+    const histogramDeceleration = detectHistogramDeceleration(macdData, decelerationBars)
 
     // Signal only if both match
     const hasSignal = rsiDivergence === macdCurl && rsiDivergence !== null
@@ -49,6 +58,7 @@ export const analyzeCandles = (closes: number[], macdLookback: number = 1): Sign
       timeframe: '',
       rsiDivergence,
       macdCurl,
+      histogramDeceleration,
       hasSignal,
       entryPrice,
       target50EMA
