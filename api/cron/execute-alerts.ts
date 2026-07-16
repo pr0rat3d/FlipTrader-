@@ -36,6 +36,27 @@ const notifyManualReview = async (symbol: string, reason: string) => {
 // reset gate below, not a general confidence floor.
 const ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD = 0.85
 
+// Per-type confidence floors, replacing the single global
+// execution_settings.min_confidence for these signal families - tuned
+// 2026-07-16 off a 90-day backtest (server/backtest/): IV is by far the
+// highest-volume signal but the weakest risk-adjusted performer there (18
+// real entries, -$92 avg, 16.7% $ win rate), so it gets a HIGHER bar. ORB
+// never once cleared the old global 65% floor in that same 90 days of real
+// data (its own base confidence rarely exceeds ~61% - see
+// orbBaseConfidence in orb.ts), so it gets a LOWER bar to finally let it be
+// tested for real instead of being structurally silenced regardless of
+// what the market actually does. TTTF/DTTF/STTF gets tightened too.
+// DIV isn't covered here on purpose - it's new (2026-07-15) with no
+// backtest history yet, so it keeps falling back to
+// execution_settings.min_confidence until there's real data to tune it by.
+const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
+  IV: 0.75,
+  ORB: 0.60,
+  TTTF: 0.70,
+  DTTF: 0.70,
+  STTF: 0.70
+}
+
 // A profit_targets leg stays status='open' (and so eligible here) for as
 // long as the underlying hasn't technically touched its own ATR-based
 // stop_loss_price - a much wider band than how fast an option premium
@@ -222,7 +243,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const direction = leg.day_trade_alerts?.macd_curl
       const confidence = leg.day_trade_alerts?.confidence ?? 0
       if (!direction) continue
-      if (confidence < settingsRow.min_confidence) continue
+      const ttfStatusForConfidence = leg.day_trade_alerts?.ttf_status
+      const minConfidence = (ttfStatusForConfidence && MIN_CONFIDENCE_BY_TYPE[ttfStatusForConfidence] !== undefined)
+        ? MIN_CONFIDENCE_BY_TYPE[ttfStatusForConfidence]
+        : settingsRow.min_confidence
+      if (confidence < minConfidence) continue
 
       // IV only - ORB's own 15-min opening-range window is already a
       // sufficient "wait," see optionPositionSizing.ts.

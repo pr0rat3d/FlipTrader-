@@ -79,8 +79,23 @@ const VOL_WINDOW_BARS = 30 // trailing bars used for the realized-vol proxy at e
 // a Vercel API handler, not a library module meant to be imported from a
 // script. Re-check these against execution_settings/execute-alerts.ts if
 // they're ever retuned live, since nothing enforces they stay in sync.
-const MIN_CONFIDENCE = 0.65
 const ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD = 0.85
+
+// Per-type confidence floors mirroring execute-alerts.ts's
+// MIN_CONFIDENCE_BY_TYPE (2026-07-16, tuned off this same backtest's
+// 90-day run: IV raised for being the weakest risk-adjusted performer at
+// high volume, ORB lowered since it never once cleared the old global 65%
+// floor in 90 days of real data, TTTF/DTTF/STTF tightened). DIV falls back
+// to the global default, same reasoning as live - no backtest history to
+// tune it by yet.
+const GLOBAL_MIN_CONFIDENCE = 0.65
+const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
+  IV: 0.75,
+  ORB: 0.60,
+  TTTF: 0.70,
+  DTTF: 0.70,
+  STTF: 0.70
+}
 
 // Single shared, evolving simulated account - NOT independent per-signal
 // capital (that was the first Phase 2 draft's known gap). Every position
@@ -261,7 +276,8 @@ const main = async () => {
     const minutesNow = nyMinutesSinceMidnight(entryTime)
 
     if (minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) return skip('past_force_close')
-    if (confidence < MIN_CONFIDENCE) return skip('below_min_confidence')
+    const minConfidence = MIN_CONFIDENCE_BY_TYPE[ttfStatus] ?? GLOBAL_MIN_CONFIDENCE
+    if (confidence < minConfidence) return skip('below_min_confidence')
     if (ttfStatus === 'IV' && minutesNow < MARKET_OPEN_MINUTES_ET + IV_ELIGIBLE_AFTER_MINUTES) return skip('iv_too_early')
 
     const key = `${symbol}:${direction}`
