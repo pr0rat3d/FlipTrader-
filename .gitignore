@@ -6,3 +6,5 @@ dist/
 *.log
 .vite/
 .vercel/
+backtest_out/
+.env*
