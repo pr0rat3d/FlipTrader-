@@ -57,6 +57,7 @@ interface Tier {
   is_runner: boolean
   target_pct: number
   filled_at: string | null
+  order_id: string | null
 }
 
 interface Position {
@@ -87,6 +88,47 @@ const sellAtMarket = async (optionSymbol: string, qty: number, clientOrderId: st
   } catch (e) {
     return { orderId: null, failure: String(e) }
   }
+}
+
+// Best-effort cleanup of any still-resting tier limit orders once a position
+// is closing through some OTHER path (stop fill, force-close) - those orders
+// were sized against contracts that are about to be (or already are) gone.
+// Never blocks the close itself: Alpaca would reject/expire a stale resting
+// sell on its own once there's nothing left to sell against it anyway, this
+// just avoids leaving orphaned orders sitting around unnecessarily.
+const cancelUnfilledTierOrders = async (tiers: Tier[]) => {
+  for (const tier of tiers) {
+    if (tier.order_id && !tier.filled_at) {
+      try { await cancelOrder(tier.order_id) } catch { /* best-effort */ }
+    }
+  }
+}
+
+// Old bot-computed quote-threshold + market-sell path for a single tier -
+// used only when that tier's own resting order failed to place at entry, or
+// landed in a terminal bad state (canceled/expired/rejected) unexpectedly.
+// Not the primary mechanism anymore (see the tier-fill loop in runOnce).
+const attemptFallbackTierSell = async (
+  optionSymbol: string, tier: Tier, bid: number, remaining: number, currentPct: number, pastTimeLock: boolean, symbolForNotify: string, tierClientOrderId: string
+): Promise<{ filled: boolean; fillPrice: number; orderId: string | null; closeStatus: string | null }> => {
+  if (tier.is_runner) {
+    const hitTarget = currentPct >= tier.target_pct
+    const timeLockEligible = pastTimeLock && currentPct >= RUNNER_TIME_LOCK_MIN_PCT
+    if (!hitTarget && !timeLockEligible) return { filled: false, fillPrice: 0, orderId: null, closeStatus: null }
+    const result = await sellAtMarket(optionSymbol, remaining, tierClientOrderId)
+    if (!result.orderId) {
+      await notifyManualReview(symbolForNotify, `Runner fallback sell failed - ${result.failure}`)
+      return { filled: false, fillPrice: 0, orderId: null, closeStatus: null }
+    }
+    return { filled: true, fillPrice: bid, orderId: result.orderId, closeStatus: hitTarget ? 'closed_target' : 'closed_time_lock' }
+  }
+  if (currentPct < tier.target_pct) return { filled: false, fillPrice: 0, orderId: null, closeStatus: null }
+  const result = await sellAtMarket(optionSymbol, 1, tierClientOrderId)
+  if (!result.orderId) {
+    await notifyManualReview(symbolForNotify, `Tier ${tier.tier_number} fallback sell failed - ${result.failure}`)
+    return { filled: false, fillPrice: 0, orderId: null, closeStatus: null }
+  }
+  return { filled: true, fillPrice: bid, orderId: result.orderId, closeStatus: null }
 }
 
 const runOnce = async (): Promise<{ managed: number; closed: number }> => {
@@ -160,6 +202,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
         // position takes priority - Alpaca will reject the stale stop's own
         // fill attempt once there's nothing left to sell against it anyway.
         if (position.stop_order_id) await cancelOrder(position.stop_order_id)
+        await cancelUnfilledTierOrders(position.option_position_tiers || [])
 
         const result = await sellAtMarket(position.option_symbol, position.remaining_contracts, ids.forceClose)
         if (result.orderId) {
@@ -204,6 +247,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           const fillPrice = stopOrder.filled_avg_price ? parseFloat(stopOrder.filled_avg_price) : quote.bid
           const adverseMove = (position.premium_entry - fillPrice) / position.premium_entry
           const stopPct = position.stop_pct ?? 0.25
+          await cancelUnfilledTierOrders(position.option_position_tiers || [])
           await supabase.from('option_positions').update({
             status: stopPct > 0 ? 'closed_hard_stop' : 'closed_stop',
             remaining_contracts: 0, closed_at: now.toISOString(),
@@ -231,6 +275,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
         if (adverseMove >= stopPct) {
           const result = await sellAtMarket(position.option_symbol, position.remaining_contracts, ids.hardStop)
           if (result.orderId) {
+            await cancelUnfilledTierOrders(position.option_position_tiers || [])
             await supabase.from('option_positions').update({
               status: stopPct > 0 ? 'closed_hard_stop' : 'closed_stop',
               remaining_contracts: 0, closed_at: now.toISOString(),
@@ -248,80 +293,125 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
         }
       }
 
-      // --- Tier fills: fixed tiers in ascending order, then the runner ---
+      // --- Tier fills: each tier (fixed AND runner) got its own resting
+      // broker-side limit sell order placed at entry (execute-alerts.ts,
+      // 2026-07-16) - mirrors the stop's design so a fast move fills the
+      // real order instantly instead of waiting for this poll to notice a
+      // bot-computed threshold. Found live 2026-07-16: SPY/QQQ calls ran up
+      // well past their tier targets and then reversed all the way into the
+      // hard stop between polls, with zero profit taken along the way.
+      //
+      // Checked independently per tier, not sequential/threshold-gated like
+      // the old design - a large gap can in principle fill a higher tier
+      // before a lower one's resting order, and each order covers a
+      // disjoint 1-contract slice of the position, so there's no
+      // overlap/oversell risk either way `remaining` unwinds.
+      //
+      // Falls back to the old bot-computed quote-threshold + market-sell
+      // only for a tier whose resting order failed to place at entry, or
+      // landed in a terminal bad state (canceled/expired/rejected)
+      // unexpectedly - belt-and-suspenders, not the primary mechanism.
       const tiers = (position.option_position_tiers || []).sort((a, b) => a.tier_number - b.tier_number)
-      const unfilledFixed = tiers.filter(t => !t.is_runner && !t.filled_at)
-      const runner = tiers.find(t => t.is_runner)
-
+      const unfilledTiers = tiers.filter(t => !t.filled_at)
+      const hasRunner = tiers.some(t => t.is_runner)
       const currentPct = (quote.bid - position.premium_entry) / position.premium_entry
+
       let remaining = position.remaining_contracts
       let anyTierFilledThisRun = false
-      // How many fixed tiers have already filled, including this run -
-      // used only to keep the ratchet's replacement stop order's
-      // client_order_id unique/traceable (see clientOrderIds.ts).
+      // How many fixed tiers have already filled, including this run - used
+      // only to keep the ratchet's replacement stop order's client_order_id
+      // unique/traceable (see clientOrderIds.ts).
       let stopReplaceAttempt = tiers.filter(t => !t.is_runner && t.filled_at).length
+      let closeStatus: string | null = null
 
-      for (const tier of unfilledFixed) {
-        // Tiers are ascending by target_pct - stop at the first threshold
-        // not yet met rather than checking the rest.
-        if (currentPct < tier.target_pct) break
-        // Only reserve the last contract when this plan actually has a
-        // runner tier to reserve it for (see optionPositionSizing.ts - the
-        // 2-contract plan has none, and is meant to fully exit by its last
-        // fixed tier).
-        if (runner && remaining <= 1) break
+      for (const tier of unfilledTiers) {
+        let filled = false
+        let fillPrice = quote.bid
 
-        const result = await sellAtMarket(position.option_symbol, 1, ids.tier(tier.tier_number))
-        if (!result.orderId) {
-          await supabase.from('option_positions').update({
-            needs_manual_review: true, review_reason: `tier ${tier.tier_number} sell failed: ${result.failure}`
-          }).eq('id', position.id)
-          await notifyManualReview(position.underlying_symbol, `Tier ${tier.tier_number} sell failed - ${result.failure}`)
-          break
-        }
-        await supabase.from('option_position_tiers').update({
-          filled_at: now.toISOString(), fill_price: quote.bid, order_id: result.orderId
-        }).eq('id', tier.id)
-        remaining -= 1
-        anyTierFilledThisRun = true
-        stopReplaceAttempt++
-      }
+        if (tier.order_id) {
+          const order = await getOrder(tier.order_id)
 
-      // --- Runner: hard +100% target, or a post-3pm lock-in at +50% if it
-      // hasn't reached target yet. Otherwise left alone to settle wherever
-      // it lands until either fires or the 3:45 force-close takes it. ---
-      let runnerClosed = false
-      if (runner && !runner.filled_at && remaining >= 1) {
-        const hitTarget = currentPct >= runner.target_pct
-        const timeLockEligible = pastTimeLock && currentPct >= RUNNER_TIME_LOCK_MIN_PCT
-
-        if (hitTarget || timeLockEligible) {
-          const result = await sellAtMarket(position.option_symbol, remaining, ids.tier(runner.tier_number))
-          if (result.orderId) {
-            // Position is now fully closing - the resting protective stop
-            // has nothing left to protect. Best-effort: don't block the
-            // close itself on this succeeding.
-            if (position.stop_order_id) await cancelOrder(position.stop_order_id)
-
+          if (order?.status === 'filled') {
+            filled = true
+            fillPrice = order.filled_avg_price ? parseFloat(order.filled_avg_price) : quote.bid
             await supabase.from('option_position_tiers').update({
-              filled_at: now.toISOString(), fill_price: quote.bid, order_id: result.orderId
-            }).eq('id', runner.id)
-            await supabase.from('option_positions').update({
-              status: hitTarget ? 'closed_target' : 'closed_time_lock',
-              remaining_contracts: 0, closed_at: now.toISOString()
-            }).eq('id', position.id)
-            runnerClosed = true
-            closed++
-          } else {
-            await supabase.from('option_positions').update({
-              needs_manual_review: true, review_reason: `runner sell failed: ${result.failure}`
-            }).eq('id', position.id)
-            await notifyManualReview(position.underlying_symbol, `Runner sell failed - ${result.failure}`)
+              filled_at: now.toISOString(), fill_price: fillPrice
+            }).eq('id', tier.id)
+            if (tier.is_runner) closeStatus = 'closed_target'
+          } else if (tier.is_runner && pastTimeLock && currentPct >= RUNNER_TIME_LOCK_MIN_PCT &&
+            order && !['canceled', 'expired', 'rejected'].includes(order.status)) {
+            // Runner hasn't hit its own +100% target yet, but the post-3pm
+            // lock-in floor has been reached - cancel the resting target
+            // order and take the smaller guaranteed win at market rather
+            // than risk riding it back down into the 3:45 force-close.
+            await cancelOrder(tier.order_id)
+            const result = await sellAtMarket(position.option_symbol, remaining, ids.tier(tier.tier_number))
+            if (result.orderId) {
+              filled = true
+              fillPrice = quote.bid
+              closeStatus = 'closed_time_lock'
+              await supabase.from('option_position_tiers').update({
+                filled_at: now.toISOString(), fill_price: fillPrice, order_id: result.orderId
+              }).eq('id', tier.id)
+            } else {
+              await notifyManualReview(position.underlying_symbol, `Runner time-lock sell failed - ${result.failure}`)
+            }
+          } else if (order && ['canceled', 'expired', 'rejected'].includes(order.status)) {
+            await notifyManualReview(position.underlying_symbol, `Tier ${tier.tier_number} resting order ${order.status} unexpectedly - falling back to bot-polled close`)
+            const fb = await attemptFallbackTierSell(
+              position.option_symbol, tier, quote.bid, remaining, currentPct, pastTimeLock, position.underlying_symbol, ids.tier(tier.tier_number)
+            )
+            if (fb.filled) {
+              filled = true
+              fillPrice = fb.fillPrice
+              closeStatus = fb.closeStatus ?? closeStatus
+              await supabase.from('option_position_tiers').update({
+                filled_at: now.toISOString(), fill_price: fb.fillPrice, order_id: fb.orderId
+              }).eq('id', tier.id)
+            }
+          }
+          // else: still resting (new/accepted/pending_new) below any
+          // fallback trigger - nothing to do, let it ride.
+        } else {
+          // No resting order (placement failed at entry) - old bot-computed
+          // path. Only reserve the runner's own contract here: the
+          // resting-order path above doesn't need this, each order already
+          // covers its own disjoint 1 contract.
+          if (!tier.is_runner && hasRunner && remaining <= 1) continue
+          const fb = await attemptFallbackTierSell(
+            position.option_symbol, tier, quote.bid, remaining, currentPct, pastTimeLock, position.underlying_symbol, ids.tier(tier.tier_number)
+          )
+          if (fb.filled) {
+            filled = true
+            fillPrice = fb.fillPrice
+            closeStatus = fb.closeStatus ?? closeStatus
+            await supabase.from('option_position_tiers').update({
+              filled_at: now.toISOString(), fill_price: fb.fillPrice, order_id: fb.orderId
+            }).eq('id', tier.id)
           }
         }
+
+        if (filled) {
+          const qtyFilled = tier.is_runner ? remaining : 1
+          remaining -= qtyFilled
+          anyTierFilledThisRun = true
+          if (!tier.is_runner) stopReplaceAttempt++
+        }
       }
 
-      if (!runnerClosed && anyTierFilledThisRun) {
+      if (remaining <= 0) {
+        // Every tier (fixed + runner, or just fixed on a no-runner plan)
+        // has now filled - nothing left for the resting protective stop to
+        // guard. Fixes a latent gap in the old design: a no-runner 2-
+        // contract plan's last fixed-tier fill never closed the position at
+        // all (there was no runner branch to do it), leaving remaining_
+        // contracts at 0 but status stuck 'open' indefinitely.
+        if (position.stop_order_id) await cancelOrder(position.stop_order_id)
+        await supabase.from('option_positions').update({
+          status: closeStatus ?? 'closed_target', remaining_contracts: 0, closed_at: now.toISOString()
+        }).eq('id', position.id)
+        closed++
+      } else if (anyTierFilledThisRun) {
         // Ratchet the resting protective stop: cancel the old one (sized/
         // priced for the pre-tier-fill position) and place a fresh one at
         // the new remaining quantity and the breakeven+5% price. Cancel-

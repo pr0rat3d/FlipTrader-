@@ -506,15 +506,43 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
         entered++
 
+        // Broker-side profit-taking, placed immediately alongside the stop -
+        // found live 2026-07-16 that bot-polled tier detection has the exact
+        // same gap the stop used to have: QQQ 715C's underlying spiked
+        // through a tier threshold and reverted within a single poll gap,
+        // so the fill was never noticed even though the move was real. Every
+        // tier in the plan (including the runner) is always exactly 1
+        // contract by design (see optionPositionSizing.ts's TIER_PLANS), so
+        // one resting limit sell per tier, each for qty=1 at that tier's
+        // target premium, covers the whole position with disjoint,
+        // non-overlapping orders - verified empirically 2026-07-16 that
+        // Alpaca accepts multiple simultaneous resting sell orders against
+        // the same option position without conflict. The runner's target
+        // price here is its hard +100% - the SEPARATE post-3pm +50% time-
+        // lock rule can't be expressed as a static limit price (it's time-
+        // conditional), so that part stays bot-polled in
+        // monitor-executions.ts, same as before.
         const tiers = tierPlanFor(sizeResult.contracts)
-        const { error: tiersError } = await supabase.from('option_position_tiers').insert(
-          tiers.map(t => ({
-            option_position_id: positionId,
-            tier_number: t.tierNumber,
-            is_runner: t.isRunner,
-            target_pct: t.targetPct
-          }))
-        )
+        const tierRows: { option_position_id: string; tier_number: number; is_runner: boolean; target_pct: number; order_id: string | null }[] = []
+
+        for (const t of tiers) {
+          const tierLimitPrice = fillPrice * (1 + t.targetPct)
+          let tierOrderId: string | null = null
+          try {
+            const tierOrder = await placeOrder({
+              symbol: contract.symbol, qty: 1, side: 'sell', type: 'limit',
+              limitPrice: tierLimitPrice, timeInForce: 'day', clientOrderId: ids.tier(t.tierNumber)
+            })
+            tierOrderId = tierOrder.id
+          } catch (e) {
+            await notifyManualReview(leg.symbol, `Tier ${t.tierNumber} limit order failed to place for ${contract.symbol} - will fall back to bot-polled detection this run: ${String(e)}`)
+          }
+          tierRows.push({
+            option_position_id: positionId, tier_number: t.tierNumber, is_runner: t.isRunner, target_pct: t.targetPct, order_id: tierOrderId
+          })
+        }
+
+        const { error: tiersError } = await supabase.from('option_position_tiers').insert(tierRows)
         if (tiersError) {
           await supabase.from('option_positions').update({
             needs_manual_review: true, review_reason: `entered but tier rows failed to insert: ${tiersError.message}`
