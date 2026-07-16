@@ -60,7 +60,7 @@ import { deriveMilestonePrices, applyPriceSample, checkExpiry, ProfitTargetRow }
 import { nyDateKey } from '../server/marketHours.js'
 import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition } from '../server/backtest/optionPnlSimulator.js'
 import {
-  MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET
+  MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, TierSpec
 } from '../server/execution/optionPositionSizing.js'
 import { nyMinutesSinceMidnight } from '../server/rvol.js'
 
@@ -137,6 +137,24 @@ interface PerSymbolBar {
   globalIndex: number
 }
 
+// Fixed-percentage exit ladder, no runner - sells exactly 1 contract per
+// 10% increment, scaled by contract count, fully exiting the position by
+// the last tier every time. Tests the hypothesis (proposed 2026-07-16,
+// after the live tier plan + a 75% IV confidence floor STILL produced a
+// losing 90-day backtest) that giving up the open-ended +100% runner for
+// guaranteed, earlier, more frequent profit-taking produces a more
+// consistently profitable - if lower-ceiling - result. NOT live - a
+// backtest-only variant, opt-in via --tier-plan fixed-ladder, compared
+// against the real live plan (tierPlanFor) over the same window.
+const FIXED_LADDER_PCTS: Record<number, number[]> = {
+  2: [0.10, 0.20],
+  3: [0.10, 0.20, 0.30],
+  4: [0.10, 0.20, 0.30, 0.40],
+  5: [0.10, 0.20, 0.30, 0.40, 0.50]
+}
+const fixedLadderNoRunnerTierPlan = (contracts: number): TierSpec[] =>
+  (FIXED_LADDER_PCTS[contracts] ?? []).map((targetPct, i) => ({ tierNumber: i + 1, isRunner: false, targetPct }))
+
 const parseArgs = () => {
   const args = process.argv.slice(2)
   const get = (flag: string): string | undefined => {
@@ -150,12 +168,22 @@ const parseArgs = () => {
     d.setDate(d.getDate() - parseInt(days ?? '90', 10))
     return d.toISOString().slice(0, 10)
   })()
-  return { start, end }
+  const hardStopPct = get('--hard-stop-pct')
+  const tierPlanArg = get('--tier-plan') // 'live' (default) or 'fixed-ladder'
+  const maxDailyEntries = get('--max-daily-entries')
+  return {
+    start, end,
+    hardStopPctOverride: hardStopPct ? parseFloat(hardStopPct) : undefined,
+    tierPlanFn: tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan : undefined,
+    tierPlanLabel: tierPlanArg === 'fixed-ladder' ? 'fixed-ladder' : 'live',
+    maxDailyEntries: maxDailyEntries ? parseInt(maxDailyEntries, 10) : Infinity
+  }
 }
 
 const main = async () => {
-  const { start, end } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
+  console.log(`Strategy: hard-stop=${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}% | tier-plan=${tierPlanLabel} | max-daily-entries=${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries}`)
 
   // Extra lookback before `start` so daily EMA200 and the intraday rolling
   // window both have real history from day 1 of the actual scored range,
@@ -231,6 +259,7 @@ const main = async () => {
   const histogramHistoryBySymbol: Record<Symbol, { timeIso: string; histogram: number }[]> = { SPY: [], QQQ: [], IWM: [] }
   const executedPositions: SimPosition[] = []
   const skippedByReason = new Map<string, number>()
+  const entriesByDay = new Map<string, number>()
   let nextPositionId = 1
   let peakConcurrentPositions = 0
 
@@ -274,8 +303,10 @@ const main = async () => {
   ) => {
     const t = entryTime.toISOString()
     const minutesNow = nyMinutesSinceMidnight(entryTime)
+    const dayKey = nyDateKey(t)
 
     if (minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) return skip('past_force_close')
+    if ((entriesByDay.get(dayKey) ?? 0) >= maxDailyEntries) return skip('max_daily_entries')
     const minConfidence = MIN_CONFIDENCE_BY_TYPE[ttfStatus] ?? GLOBAL_MIN_CONFIDENCE
     if (confidence < minConfidence) return skip('below_min_confidence')
     if (ttfStatus === 'IV' && minutesNow < MARKET_OPEN_MINUTES_ET + IV_ELIGIBLE_AFTER_MINUTES) return skip('iv_too_early')
@@ -312,10 +343,11 @@ const main = async () => {
     })
     if (!priced.ok) return skip(priced.reason)
 
-    const position = openPosition(nextPositionId++, ttfStatus, symbol, direction, priced, t)
+    const position = openPosition(nextPositionId++, ttfStatus, symbol, direction, priced, t, { tierPlanFn, hardStopPct: hardStopPctOverride })
     committedCapital += priced.contracts * priced.entryPremium * 100
     openPositions.push(position)
     openPositionBySymbolDirection.set(key, position)
+    entriesByDay.set(dayKey, (entriesByDay.get(dayKey) ?? 0) + 1)
     peakConcurrentPositions = Math.max(peakConcurrentPositions, openPositions.length)
   }
 
@@ -600,10 +632,13 @@ const main = async () => {
     console.log(`  ${reason}: ${count}`)
   }
 
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
+
   mkdirSync('backtest_out', { recursive: true })
-  const outFile = `backtest_out/${start}_to_${end}.json`
+  const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
   writeFileSync(outFile, JSON.stringify({
     start, end, barsEvaluated, legs, executedPositions,
+    strategy: { hardStopPct: hardStopPctOverride ?? 0.25, tierPlan: tierPlanLabel, maxDailyEntries: maxDailyEntries === Infinity ? null : maxDailyEntries },
     summary: { grandTotalPnl, finalEquity: simEquity, peakConcurrentPositions, skippedByReason: Object.fromEntries(skippedByReason) }
   }, null, 1))
   console.log(`\nFull detail written to ${outFile}`)

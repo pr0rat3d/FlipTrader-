@@ -85,13 +85,25 @@ export const modeledPremiumAt = (position: Pick<SimPosition, 'strike' | 'contrac
   return blackScholesPrice(underlyingClose, position.strike, T, RISK_FREE_RATE, position.sigma, position.contractType)
 }
 
+// Optional strategy overrides - default to exactly what's live
+// (tierPlanFor, HARD_STOP_PCT_DEFAULT) when omitted, so the baseline
+// backtest run always matches live behavior. Passing overrides lets the
+// backtest test a hypothesis (a different tier ladder, a tighter stop)
+// against the same historical window before ever touching live code -
+// these overrides do NOT change optionPositionSizing.ts itself.
+export interface StrategyOverrides {
+  tierPlanFn?: (contracts: number) => TierSpec[]
+  hardStopPct?: number
+}
+
 export const openPosition = (
-  id: number, ttfStatus: string, symbol: string, direction: 'bullish' | 'bearish', entry: Extract<EntryPriceOutcome, { ok: true }>, entryTimeIso: string
+  id: number, ttfStatus: string, symbol: string, direction: 'bullish' | 'bearish', entry: Extract<EntryPriceOutcome, { ok: true }>, entryTimeIso: string,
+  overrides: StrategyOverrides = {}
 ): SimPosition => ({
   id, ttfStatus, symbol, direction,
   contractType: entry.contractType, strike: entry.strike, contracts: entry.contracts, remaining: entry.contracts,
-  entryPremium: entry.entryPremium, entryTimeIso, sigma: entry.sigma, stopPct: HARD_STOP_PCT_DEFAULT,
-  tiers: tierPlanFor(entry.contracts), filledTierCount: 0, fills: [], status: 'open', closedAtIso: null, realizedPnl: 0
+  entryPremium: entry.entryPremium, entryTimeIso, sigma: entry.sigma, stopPct: overrides.hardStopPct ?? HARD_STOP_PCT_DEFAULT,
+  tiers: (overrides.tierPlanFn ?? tierPlanFor)(entry.contracts), filledTierCount: 0, fills: [], status: 'open', closedAtIso: null, realizedPnl: 0
 })
 
 // One bar's worth of position management - the exact same checks
