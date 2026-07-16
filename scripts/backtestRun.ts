@@ -539,7 +539,7 @@ const main = async () => {
     if (!fullConfluenceFired) {
       for (const direction of ['bullish', 'bearish'] as const) {
         const candidateSignals = perSymbolSignals.map(s => ({ symbol: s.symbol, macdCurl: s.macdCurl, candles: s.sessionCandlesSoFar }))
-        const qualifyingSymbols = filterORBCandidates(candidateSignals, direction)
+        const qualifyingSymbols = filterORBCandidates(candidateSignals, direction, openingRangeFor)
         if (qualifyingSymbols.length < 1) continue
 
         const candidates = perSymbolSignals.filter(s => qualifyingSymbols.includes(s.symbol))

@@ -1,6 +1,8 @@
 import { Candle } from './twelvedata.js'
 import { calculateOpeningRange } from './supportResistance.js'
 
+type OpeningRangeFn = (candles: Candle[]) => { orh: number; orl: number } | null
+
 // Full candle CLOSE outside the opening range (not a wick) - the latest bar
 // having already closed beyond orh/orl. "Continuation" isn't a separate
 // multi-bar streak check here - it's captured by the confidence modifier's
@@ -30,14 +32,27 @@ export interface ORBCandidateSignal {
 // enough confirmation. The daily-trend gate is checked separately (once, via
 // a representative symbol) since trend is a session-level condition, not a
 // per-symbol one.
+//
+// `openingRangeFn` defaults to the live calculateOpeningRange (unchanged
+// live behavior) but can be overridden - found live 2026-07-16 that the
+// backtest was calling this with historical replay candles while
+// calculateOpeningRange internally hardcodes "today" as
+// nyDateKey(new Date()), the REAL current date. For any historical day
+// that isn't literally today, that filter matches nothing, so
+// calculateOpeningRange always returned null and this function always
+// returned zero candidates - looked exactly like "ORB never qualifies in
+// 90 days of real data," which was actually just this bug, not a real
+// finding about the market. The backtest now injects
+// server/backtest/replayHelpers.ts's openingRangeFor instead.
 export const filterORBCandidates = (
   signals: ORBCandidateSignal[],
-  direction: 'bullish' | 'bearish'
+  direction: 'bullish' | 'bearish',
+  openingRangeFn: OpeningRangeFn = calculateOpeningRange
 ): string[] => {
   return signals
     .filter(s => s.macdCurl === direction)
     .filter(s => {
-      const or = calculateOpeningRange(s.candles)
+      const or = openingRangeFn(s.candles)
       return detectORBBreakout(s.candles, or?.orh ?? null, or?.orl ?? null) === direction
     })
     .map(s => s.symbol)
