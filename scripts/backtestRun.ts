@@ -82,19 +82,19 @@ const VOL_WINDOW_BARS = 30 // trailing bars used for the realized-vol proxy at e
 const ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD = 0.85
 
 // Per-type confidence floors mirroring execute-alerts.ts's
-// MIN_CONFIDENCE_BY_TYPE (2026-07-16, tuned off this same backtest's
-// 90-day run: IV raised for being the weakest risk-adjusted performer at
-// high volume, ORB lowered since it never once cleared the old global 65%
-// floor in 90 days of real data, TTTF/DTTF/STTF tightened). DIV falls back
-// to the global default, same reasoning as live - no backtest history to
-// tune it by yet.
+// MIN_CONFIDENCE_BY_TYPE (2026-07-16, revised after fixing the
+// filterORBCandidates bug - see orb.ts). ORB lowest (best performer once
+// actually working), TTF-family in the middle (its extra RSI-divergence
+// requirement already filters better than IV's mechanism does), IV highest
+// (worst performer at high volume in every variant run). DIV falls back to
+// the global default - no backtest history to tune it by yet.
 const GLOBAL_MIN_CONFIDENCE = 0.65
 const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
-  IV: 0.75,
   ORB: 0.60,
-  TTTF: 0.70,
-  DTTF: 0.70,
-  STTF: 0.70
+  TTTF: 0.65,
+  DTTF: 0.65,
+  STTF: 0.65,
+  IV: 0.80
 }
 
 // Single shared, evolving simulated account - NOT independent per-signal

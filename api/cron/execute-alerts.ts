@@ -38,23 +38,35 @@ const ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD = 0.85
 
 // Per-type confidence floors, replacing the single global
 // execution_settings.min_confidence for these signal families - tuned
-// 2026-07-16 off a 90-day backtest (server/backtest/): IV is by far the
-// highest-volume signal but the weakest risk-adjusted performer there (18
-// real entries, -$92 avg, 16.7% $ win rate), so it gets a HIGHER bar. ORB
-// never once cleared the old global 65% floor in that same 90 days of real
-// data (its own base confidence rarely exceeds ~61% - see
-// orbBaseConfidence in orb.ts), so it gets a LOWER bar to finally let it be
-// tested for real instead of being structurally silenced regardless of
-// what the market actually does. TTTF/DTTF/STTF gets tightened too.
+// 2026-07-16 off a 90-day backtest (server/backtest/), revised same day
+// once a real bug in the backtest's ORB detection got fixed (it had been
+// silently returning zero candidates every single day - see orb.ts's
+// filterORBCandidates comment). With that fixed, the actual pattern across
+// every backtest variant run was consistent: ORB was the best performer
+// (10 entries, +$337 total, 60% win rate at the original settings), IV was
+// the worst by a wide margin despite being by far the highest-volume
+// signal (26 entries, -$1873, 23.1% win rate), and TTTF/DTTF/STTF -
+// conceptually IV's stricter sibling, sharing the same MACD-curl backbone
+// but additionally requiring RSI divergence (a much rarer, more specific
+// price-structure event - 1,229 TTF-family legs vs IV's 9,437 over the
+// same 90 days) - consistently outperformed IV (in a 15%-stop comparison
+// run: TTTF +$260/64.7% win rate, DTTF +$287/80% win rate, vs IV's
+// -$1523/38.5%). Floors set accordingly: lowest bar for the best performer,
+// highest bar for the worst, TTF-family in between reflecting that its
+// built-in extra confirmation already does real filtering work IV's
+// mechanism doesn't have.
 // DIV isn't covered here on purpose - it's new (2026-07-15) with no
 // backtest history yet, so it keeps falling back to
-// execution_settings.min_confidence until there's real data to tune it by.
+// execution_settings.min_confidence until there's real data to tune it by
+// (worth watching: it underperformed in every backtest run so far, -$227
+// to -$1006 depending on the run, despite being conceptually related to
+// the TTF family - not yet enough data to act on).
 const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
-  IV: 0.75,
   ORB: 0.60,
-  TTTF: 0.70,
-  DTTF: 0.70,
-  STTF: 0.70
+  TTTF: 0.65,
+  DTTF: 0.65,
+  STTF: 0.65,
+  IV: 0.80
 }
 
 // A profit_targets leg stays status='open' (and so eligible here) for as
