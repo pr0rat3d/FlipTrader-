@@ -3,6 +3,8 @@ import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { isMarketOpen, hasSessionClosedSince, nyDateKey } from '../../server/marketHours.js'
 import { getAccount, placeOrder, getOrder, findOptionContract, getOptionQuote } from '../../server/execution/alpacaClient.js'
+import { sendToTopic } from '../../server/firebase-notify.js'
+import { ALERTS_TOPIC } from '../register-token.js'
 import {
   computeContractCount, tierPlanFor, ContractSizeSettings,
   FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES
@@ -20,6 +22,10 @@ export const config = {
 const FILL_POLL_ATTEMPTS = 8
 const FILL_POLL_INTERVAL_MS = 1000
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+const notifyManualReview = async (symbol: string, reason: string) => {
+  await sendToTopic(ALERTS_TOPIC, `Options bot: manual review (${symbol})`, reason)
+}
 
 // A high-confidence ORB continuation on a supertrend day (up all day, down
 // all day, little-to-no reversal) can legitimately keep re-firing on the
@@ -422,12 +428,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           continue
         }
 
+        // Broker-side stop order, placed immediately on fill - protection now
+        // runs on Alpaca's own matching engine instead of depending on the
+        // next monitor-executions.ts poll noticing in time. Verified
+        // empirically 2026-07-16 that Alpaca accepts a resting `stop` order
+        // on options for this account (confirmed live: placed, filled a
+        // buying-power check, cancelled cleanly). A sell-stop triggers when
+        // price falls TO OR BELOW stopPrice, matching the same
+        // adverseMove >= stopPct comparison monitor-executions.ts used to
+        // poll for itself.
+        const stopPrice = fillPrice * (1 - settingsRow.hard_stop_pct)
+        let stopOrderId: string | null = null
+        let stopPlacementError: string | null = null
+        try {
+          const stopOrder = await placeOrder({
+            symbol: contract.symbol, qty: sizeResult.contracts, side: 'sell', type: 'stop',
+            stopPrice, timeInForce: 'day', clientOrderId: ids.hardStop
+          })
+          stopOrderId = stopOrder.id
+        } catch (e) {
+          stopPlacementError = String(e)
+        }
+
         await supabase.from('option_positions').update({
           status: 'open',
           premium_entry: fillPrice,
           remaining_contracts: sizeResult.contracts,
-          stop_pct: settingsRow.hard_stop_pct
+          stop_pct: settingsRow.hard_stop_pct,
+          stop_order_id: stopOrderId,
+          // A position that filled but couldn't get its protective stop
+          // placed is naked - exactly the kind of silent gap that let real
+          // positions run unprotected before (the OPRA-bars bug, 2026-07-15).
+          // Flag it loudly rather than let it look like any other open
+          // position until someone happens to check.
+          needs_manual_review: stopOrderId === null,
+          review_reason: stopOrderId === null ? `entry filled but protective stop order failed to place: ${stopPlacementError}` : null
         }).eq('id', positionId)
+        if (stopOrderId === null) {
+          await notifyManualReview(leg.symbol, `CRITICAL: ${contract.symbol} filled but has NO protective stop - ${stopPlacementError}`)
+        }
         entered++
 
         const tiers = tierPlanFor(sizeResult.contracts)
