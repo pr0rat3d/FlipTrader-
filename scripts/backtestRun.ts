@@ -60,7 +60,8 @@ import { deriveMilestonePrices, applyPriceSample, checkExpiry, ProfitTargetRow }
 import { nyDateKey } from '../server/marketHours.js'
 import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition } from '../server/backtest/optionPnlSimulator.js'
 import {
-  MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, TierSpec
+  MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, TierSpec,
+  RUNNER_TIER_NUMBER, RUNNER_TARGET_PCT
 } from '../server/execution/optionPositionSizing.js'
 import { nyMinutesSinceMidnight } from '../server/rvol.js'
 
@@ -155,6 +156,24 @@ const FIXED_LADDER_PCTS: Record<number, number[]> = {
 const fixedLadderNoRunnerTierPlan = (contracts: number): TierSpec[] =>
   (FIXED_LADDER_PCTS[contracts] ?? []).map((targetPct, i) => ({ tierNumber: i + 1, isRunner: false, targetPct }))
 
+// Hybrid plan proposed 2026-07-16: no runner at 2/3/4 contracts (full fixed
+// exit, same spirit as fixed-ladder above but with a steeper final step -
+// 2 contracts skips straight to 25% instead of 20%), but 5 contracts keeps
+// a real runner as the last piece (+100% target / +50% post-3pm lock,
+// unchanged mechanics) rather than going fully fixed like fixed-ladder's
+// 5-contract plan does. NOT live - opt-in via --tier-plan hybrid-runner5.
+const HYBRID_RUNNER5_PCTS: Record<number, number[]> = {
+  2: [0.15, 0.25],
+  3: [0.10, 0.20, 0.30],
+  4: [0.10, 0.20, 0.30, 0.40],
+  5: [0.10, 0.20, 0.30, 0.40]
+}
+const hybridRunner5TierPlan = (contracts: number): TierSpec[] => {
+  const pcts = HYBRID_RUNNER5_PCTS[contracts] ?? []
+  const fixed = pcts.map((targetPct, i) => ({ tierNumber: i + 1, isRunner: false, targetPct }))
+  return contracts === 5 ? [...fixed, { tierNumber: RUNNER_TIER_NUMBER, isRunner: true, targetPct: RUNNER_TARGET_PCT }] : fixed
+}
+
 const parseArgs = () => {
   const args = process.argv.slice(2)
   const get = (flag: string): string | undefined => {
@@ -169,16 +188,19 @@ const parseArgs = () => {
     return d.toISOString().slice(0, 10)
   })()
   const hardStopPct = get('--hard-stop-pct')
-  const tierPlanArg = get('--tier-plan') // 'live' (default) or 'fixed-ladder'
+  const tierPlanArg = get('--tier-plan') // 'live' (default), 'fixed-ladder', or 'hybrid-runner5'
   const maxDailyEntries = get('--max-daily-entries')
   const chopStart = get('--chop-start') // "HH:MM" ET, e.g. "10:00"
   const chopEnd = get('--chop-end')
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
+  const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
+    : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
+    : undefined
   return {
     start, end,
     hardStopPctOverride: hardStopPct ? parseFloat(hardStopPct) : undefined,
-    tierPlanFn: tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan : undefined,
-    tierPlanLabel: tierPlanArg === 'fixed-ladder' ? 'fixed-ladder' : 'live',
+    tierPlanFn,
+    tierPlanLabel: tierPlanArg ?? 'live',
     maxDailyEntries: maxDailyEntries ? parseInt(maxDailyEntries, 10) : Infinity,
     chopZoneStartMinutes: chopStart ? toMinutes(chopStart) : undefined,
     chopZoneEndMinutes: chopEnd ? toMinutes(chopEnd) : undefined,
