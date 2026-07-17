@@ -109,7 +109,17 @@ const SIM_STARTING_EQUITY = 2000
 const MARGIN_MULTIPLIER = 2
 const SIM_RISK_PCT = 0.10
 const SIM_MIN_EQUITY = 500
-const SIM_MAX_EQUITY = 5000
+// Was 5000, mirroring the live execution_settings.max_account_equity value -
+// found live 2026-07-17 that computeContractCount's upper-band check has no
+// recovery mechanism: once equity crosses the ceiling, EVERY future entry
+// gets rejected as 'equity_out_of_band' forever (equity can't come back down
+// without trades, and trades can't happen without equity coming back down).
+// Confirmed in a real 90-day backtest: the baseline run crossed $5000 on
+// 2026-05-11 and went completely silent for the remaining ~2 months of the
+// window - every "positive" backtest result up to this point was actually
+// "made enough to hit the ceiling by some date, then sat idle," not a true
+// 90-day read. Raised to effectively unlimited live and here, matching.
+const SIM_MAX_EQUITY = 100_000_000
 
 const stopLossFor = (direction: 'bullish' | 'bearish', entryPrice: number, atr: number | null): number | null => {
   if (atr === null) return null
@@ -214,6 +224,7 @@ const parseArgs = () => {
   const orbIntradayVwapGate = args.includes('--orb-intraday-vwap-gate')
   const orbStopPct = get('--orb-stop-pct') // e.g. "0.25" - wider stop for ORB only, everything else keeps the flat hard-stop-pct
   const maxDailyCapital = get('--max-daily-capital') // dollars, e.g. "2000" - replaces max-daily-entries entirely when set
+  const dailyLossLimit = get('--daily-loss-limit-pct') // e.g. "0.15" - pause new entries once today's realized loss hits this fraction of the day's starting equity
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -231,16 +242,18 @@ const parseArgs = () => {
     hardStopPctByType: orbStopPct ? { ORB: parseFloat(orbStopPct) } : undefined,
     orbStopPctLabel: orbStopPct ?? 'same-as-global',
     maxDailyCapitalBudget: maxDailyCapital ? parseFloat(maxDailyCapital) : undefined,
+    dailyLossLimitPct: dailyLossLimit ? parseFloat(dailyLossLimit) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
+  console.log(`Daily loss circuit breaker: ${dailyLossLimitPct !== undefined ? `ON (${(dailyLossLimitPct * 100).toFixed(0)}% of day's starting equity)` : 'OFF'}`)
   console.log(`Strategy: hard-stop=${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}% | tier-plan=${tierPlanLabel} | max-daily-entries=${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries} | chop-zone=${chopLabel}`)
 
   // Extra lookback before `start` so daily EMA200 and the intraday rolling
@@ -321,6 +334,19 @@ const main = async () => {
   let nextPositionId = 1
   let peakConcurrentPositions = 0
 
+  // Daily-loss circuit breaker, proposed 2026-07-17 after a 43% single-day
+  // drawdown with no mechanism to pause new entries once a bad stretch was
+  // already underway - flagged as a gap since the very first live session
+  // (2026-07-15) and never built. startOfDayEquityByDay captures simEquity
+  // the first time a day is seen (before that day's first entry can touch
+  // it); the gate then compares CURRENT simEquity against that day's own
+  // starting point - a realized-P&L-only measure (simEquity only moves on
+  // actual fills, not mark-to-market of open positions), which is the
+  // cheaply-available, conservative choice: it reacts to closed losses, not
+  // paper swings. Opt-in via --daily-loss-limit-pct <fraction>, e.g. 0.15.
+  const startOfDayEquityByDay = new Map<string, number>()
+  const dailyLossLimitHitByDay = new Set<string>()
+
   const skip = (reason: string) => skippedByReason.set(reason, (skippedByReason.get(reason) ?? 0) + 1)
 
   // Applies exactly the NEW fills (since previousFillCount) to the shared
@@ -379,6 +405,13 @@ const main = async () => {
     const dayKey = nyDateKey(t)
 
     if (minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) return skip('past_force_close')
+    if (dailyLossLimitPct !== undefined) {
+      const startOfDay = startOfDayEquityByDay.get(dayKey) ?? simEquity
+      if (simEquity <= startOfDay * (1 - dailyLossLimitPct)) {
+        dailyLossLimitHitByDay.add(dayKey)
+        return skip('daily_loss_limit')
+      }
+    }
     if (maxDailyCapitalBudget === undefined && (entriesByDay.get(dayKey) ?? 0) >= maxDailyEntries) return skip('max_daily_entries')
     const minConfidence = MIN_CONFIDENCE_BY_TYPE[ttfStatus] ?? GLOBAL_MIN_CONFIDENCE
     if (confidence < minConfidence) return skip('below_min_confidence')
@@ -442,6 +475,9 @@ const main = async () => {
     const t = clockBar.datetime
     const now = new Date(t)
     barsEvaluated++
+
+    const todayKey = nyDateKey(t)
+    if (!startOfDayEquityByDay.has(todayKey)) startOfDayEquityByDay.set(todayKey, simEquity)
 
     // --- 1a. Update every currently-open leg (Phase 1) against this bar's close ---
     for (const symbol of SYMBOLS) {
@@ -724,8 +760,12 @@ const main = async () => {
     console.log(`  ${reason}: ${count}`)
   }
 
+  if (dailyLossLimitPct !== undefined) {
+    console.log(`\nDaily loss circuit breaker tripped on ${dailyLossLimitHitByDay.size} of ${new Set(clockBars.map(c => nyDateKey(c.datetime))).size} trading days`)
+  }
+
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
