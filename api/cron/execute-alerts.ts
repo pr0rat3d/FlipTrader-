@@ -2,7 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { isMarketOpen, hasSessionClosedSince, nyDateKey } from '../../server/marketHours.js'
-import { getAccount, placeOrder, getOrder, findOptionContract, getOptionQuote } from '../../server/execution/alpacaClient.js'
+import { getAccount, placeOrder, getOrder, findOptionContract, getOptionQuote, describeAlpacaError } from '../../server/execution/alpacaClient.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import {
@@ -117,7 +117,7 @@ const closeOpposingPositions = async (newDirection: 'bullish' | 'bearish'): Prom
       closed++
     } catch (e) {
       await supabase.from('option_positions').update({
-        needs_manual_review: true, review_reason: `opposing-direction flatten failed: ${String(e)}`
+        needs_manual_review: true, review_reason: `opposing-direction flatten failed: ${describeAlpacaError(e)}`
       }).eq('id', pos.id)
     }
   }
@@ -438,7 +438,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           })
         } catch (e) {
           await supabase.from('option_positions').update({
-            status: 'entry_failed', account_equity_at_entry: account.equity, review_reason: String(e),
+            status: 'entry_failed', account_equity_at_entry: account.equity, review_reason: describeAlpacaError(e),
             option_symbol: contract.symbol, contract_type: contractType, strike_price: contract.strikePrice, expiration_date: expirationDate
           }).eq('id', positionId)
           continue
@@ -496,7 +496,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           })
           stopOrderId = stopOrder.id
         } catch (e) {
-          stopPlacementError = String(e)
+          stopPlacementError = describeAlpacaError(e)
         }
 
         await supabase.from('option_positions').update({
@@ -547,7 +547,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             })
             tierOrderId = tierOrder.id
           } catch (e) {
-            await notifyManualReview(leg.symbol, `Tier ${t.tierNumber} limit order failed to place for ${contract.symbol} - will fall back to bot-polled detection this run: ${String(e)}`)
+            await notifyManualReview(leg.symbol, `Tier ${t.tierNumber} limit order failed to place for ${contract.symbol} - will fall back to bot-polled detection this run: ${describeAlpacaError(e)}`)
           }
           tierRows.push({
             option_position_id: positionId, tier_number: t.tierNumber, is_runner: t.isRunner, target_pct: t.targetPct, order_id: tierOrderId
@@ -571,6 +571,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(200).json({ success: true, processed, entered })
   } catch (error) {
     console.error('Error in execute-alerts:', error)
-    res.status(500).json({ error: String(error) })
+    res.status(500).json({ error: describeAlpacaError(error) })
   }
 }

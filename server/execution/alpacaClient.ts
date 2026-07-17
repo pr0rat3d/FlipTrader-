@@ -7,6 +7,28 @@ import axios from 'axios'
 const REQUEST_TIMEOUT_MS = 10_000
 const http = axios.create({ timeout: REQUEST_TIMEOUT_MS })
 
+// Every order-placement catch block across execute-alerts.ts and
+// monitor-executions.ts used to do `String(e)` on a failed placeOrder call -
+// on an AxiosError that only ever produces the generic "Request failed with
+// status code 422", discarding Alpaca's actual response body (which almost
+// always explains WHY - insufficient buying power, asset not tradable,
+// invalid qty, etc.). Found live 2026-07-17: three days of recurring 403/422
+// failures (first flagged 2026-07-15) were never root-caused because nothing
+// ever captured what Alpaca actually said. Use this instead of String(e) in
+// any catch around a placeOrder/cancelOrder/replaceOrder call.
+export const describeAlpacaError = (e: unknown): string => {
+  if (axios.isAxiosError(e)) {
+    const status = e.response?.status
+    const data = e.response?.data
+    if (data !== undefined) {
+      const dataStr = typeof data === 'string' ? data : JSON.stringify(data)
+      return `Alpaca ${status ?? '?'}: ${dataStr}`
+    }
+    return `Alpaca request failed (${status ?? 'no response'}): ${e.message}`
+  }
+  return String(e)
+}
+
 // Env read lazily inside each function (not at module load) so an unrelated
 // function importing this module can't crash on missing Alpaca env - same
 // reasoning as finnhub.ts's module-level constant, but this module is used

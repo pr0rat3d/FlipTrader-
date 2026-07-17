@@ -3,7 +3,7 @@ import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
-import { getOrder, placeOrder, cancelOrder, getOptionQuote } from '../../server/execution/alpacaClient.js'
+import { getOrder, placeOrder, cancelOrder, getOptionQuote, describeAlpacaError } from '../../server/execution/alpacaClient.js'
 import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import {
   RUNNER_TIME_LOCK_HOUR_ET, RUNNER_TIME_LOCK_MINUTE_ET, RUNNER_TIME_LOCK_MIN_PCT,
@@ -86,7 +86,7 @@ const sellAtMarket = async (optionSymbol: string, qty: number, clientOrderId: st
     const order = await placeOrder({ symbol: optionSymbol, qty, side: 'sell', type: 'market', timeInForce: 'day', clientOrderId })
     return { orderId: order.id, failure: null }
   } catch (e) {
-    return { orderId: null, failure: String(e) }
+    return { orderId: null, failure: describeAlpacaError(e) }
   }
 }
 
@@ -431,9 +431,9 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           newStopOrderId = newStopOrder.id
         } catch (e) {
           await supabase.from('option_positions').update({
-            needs_manual_review: true, review_reason: `stop replace after tier fill failed - position unprotected: ${String(e)}`
+            needs_manual_review: true, review_reason: `stop replace after tier fill failed - position unprotected: ${describeAlpacaError(e)}`
           }).eq('id', position.id)
-          await notifyManualReview(position.underlying_symbol, `CRITICAL: stop replace failed after tier fill - position now unprotected - ${String(e)}`)
+          await notifyManualReview(position.underlying_symbol, `CRITICAL: stop replace failed after tier fill - position now unprotected - ${describeAlpacaError(e)}`)
         }
 
         await supabase.from('option_positions').update({
@@ -443,7 +443,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
     } catch (positionError) {
       console.error(`Error managing option position ${position.id} (${position.underlying_symbol}):`, positionError)
       await supabase.from('option_positions').update({
-        needs_manual_review: true, review_reason: String(positionError)
+        needs_manual_review: true, review_reason: describeAlpacaError(positionError)
       }).eq('id', position.id)
     }
   }
@@ -468,6 +468,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(200).json({ success: true, managed: totalManaged, closed: totalClosed, checksRun: CHECKS_PER_INVOCATION })
   } catch (error) {
     console.error('Error in monitor-executions:', error)
-    res.status(500).json({ error: String(error) })
+    res.status(500).json({ error: describeAlpacaError(error) })
   }
 }
