@@ -212,6 +212,8 @@ const parseArgs = () => {
   const chopStart = get('--chop-start') // "HH:MM" ET, e.g. "10:00"
   const chopEnd = get('--chop-end')
   const orbIntradayVwapGate = args.includes('--orb-intraday-vwap-gate')
+  const orbStopPct = get('--orb-stop-pct') // e.g. "0.25" - wider stop for ORB only, everything else keeps the flat hard-stop-pct
+  const maxDailyCapital = get('--max-daily-capital') // dollars, e.g. "2000" - replaces max-daily-entries entirely when set
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -226,14 +228,19 @@ const parseArgs = () => {
     chopZoneStartMinutes: chopStart ? toMinutes(chopStart) : undefined,
     chopZoneEndMinutes: chopEnd ? toMinutes(chopEnd) : undefined,
     orbIntradayVwapGate,
+    hardStopPctByType: orbStopPct ? { ORB: parseFloat(orbStopPct) } : undefined,
+    orbStopPctLabel: orbStopPct ?? 'same-as-global',
+    maxDailyCapitalBudget: maxDailyCapital ? parseFloat(maxDailyCapital) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
+  console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
+  console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
   console.log(`Strategy: hard-stop=${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}% | tier-plan=${tierPlanLabel} | max-daily-entries=${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries} | chop-zone=${chopLabel}`)
 
   // Extra lookback before `start` so daily EMA200 and the intraday rolling
@@ -345,6 +352,21 @@ const main = async () => {
     return direction === 'bullish' ? history.some(h => h.histogram <= 0) : history.some(h => h.histogram >= 0)
   }
 
+  // Cumulative $ committed today (contracts * entry premium * 100 at open,
+  // summed across every entry - NOT decremented when a position later
+  // closes and frees its capital back). Proposed 2026-07-17, live: a flat
+  // trade-COUNT cap (maxDailyEntries) treats a 5-contract $0.12 entry
+  // (~$60 committed) identically to a 2-contract $2.31 entry (~$460
+  // committed) - a cluster of cheap, fast-stopping entries can burn the
+  // whole day's count allowance before 10:30am with very little capital
+  // actually having been at risk, then block a genuinely good later setup
+  // with zero room left. This gates on total $ deployed today instead, so
+  // many small entries can still fit under one cheap-entry's-worth of
+  // exposure while capping overall daily capital throughput. Opt-in via
+  // --max-daily-capital <dollars> - when set, maxDailyEntries is ignored
+  // entirely (mutually exclusive modes, not combined).
+  const dailyCapitalCommittedByDay = new Map<string, number>()
+
   // Mirrors execute-alerts.ts's real entry gates, in the same order, against
   // the shared simulated account. Called once per fired leg, right after
   // Phase 1's ungated makeLeg for the same signal.
@@ -357,7 +379,7 @@ const main = async () => {
     const dayKey = nyDateKey(t)
 
     if (minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) return skip('past_force_close')
-    if ((entriesByDay.get(dayKey) ?? 0) >= maxDailyEntries) return skip('max_daily_entries')
+    if (maxDailyCapitalBudget === undefined && (entriesByDay.get(dayKey) ?? 0) >= maxDailyEntries) return skip('max_daily_entries')
     const minConfidence = MIN_CONFIDENCE_BY_TYPE[ttfStatus] ?? GLOBAL_MIN_CONFIDENCE
     if (confidence < minConfidence) return skip('below_min_confidence')
     if (ttfStatus === 'IV' && minutesNow < MARKET_OPEN_MINUTES_ET + IV_ELIGIBLE_AFTER_MINUTES) return skip('iv_too_early')
@@ -365,8 +387,13 @@ const main = async () => {
     const key = `${symbol}:${direction}`
     if (openPositionBySymbolDirection.has(key)) return skip('same_symbol_direction_open')
 
+    // Mirrors execute-alerts.ts's momentum-reset gate (2026-07-17: DIV added
+    // - it's a pre-confirmation tier without a completed MACD crossover, so
+    // it doesn't get TTF-family's "genuinely new price extreme required to
+    // fire" protection, and was found live re-firing repeatedly on the same
+    // symbol during tight chop with no real price structure behind it).
     const orbHighConfidenceContinuation = ttfStatus === 'ORB' && confidence >= ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD
-    if ((ttfStatus === 'IV' || ttfStatus === 'ORB') && !orbHighConfidenceContinuation) {
+    if ((ttfStatus === 'IV' || ttfStatus === 'ORB' || ttfStatus === 'DIV') && !orbHighConfidenceContinuation) {
       const lastClose = lastCloseTimeBySymbolDirection.get(key)
       if (lastClose && nyDateKey(lastClose) === nyDateKey(t) && !hasMomentumReset(symbol, direction, lastClose)) {
         return skip('momentum_not_reset')
@@ -394,8 +421,15 @@ const main = async () => {
     })
     if (!priced.ok) return skip(priced.reason)
 
-    const position = openPosition(nextPositionId++, ttfStatus, symbol, direction, priced, t, { tierPlanFn, hardStopPct: hardStopPctOverride })
-    committedCapital += priced.contracts * priced.entryPremium * 100
+    const entryCost = priced.contracts * priced.entryPremium * 100
+    if (maxDailyCapitalBudget !== undefined) {
+      const spentToday = dailyCapitalCommittedByDay.get(dayKey) ?? 0
+      if (spentToday + entryCost > maxDailyCapitalBudget) return skip('max_daily_capital')
+      dailyCapitalCommittedByDay.set(dayKey, spentToday + entryCost)
+    }
+
+    const position = openPosition(nextPositionId++, ttfStatus, symbol, direction, priced, t, { tierPlanFn, hardStopPct: hardStopPctOverride, hardStopPctByType })
+    committedCapital += entryCost
     openPositions.push(position)
     openPositionBySymbolDirection.set(key, position)
     entriesByDay.set(dayKey, (entriesByDay.get(dayKey) ?? 0) + 1)
@@ -690,7 +724,8 @@ const main = async () => {
     console.log(`  ${reason}: ${count}`)
   }
 
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}${orbIntradayVwapGate ? '_orbvwap' : ''}`
+  const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`

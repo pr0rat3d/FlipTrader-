@@ -288,28 +288,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // (any resolution) still guards re-entry until momentum actually
       // resets - see hasMomentumReset above. Only today's close matters; a
       // resolved position from a prior session has no bearing on a fresh
-      // session's first move. IV and ORB are exactly the repetitive-re-fire
-      // case this gate targets (re-firing every few minutes off the same
-      // static level/breakout with no new price structure behind it) - but
-      // TTTF/DTTF/STTF is exempt, since RSI divergence requires a genuinely
-      // NEW price extreme with RSI failing to confirm it (detectRSIDivergence)
-      // to fire at all. A second full-confluence signal later in the day
-      // already IS the proof of a fresh pullback-and-turn; gating it on the
-      // histogram too would risk blocking a legitimate high-confidence
-      // re-entry during a strong, persistently one-sided trend day where the
-      // histogram simply never dips back through zero.
+      // session's first move. IV, ORB, and DIV are exactly the repetitive-
+      // re-fire case this gate targets (re-firing every few minutes off the
+      // same static level/breakout/pre-confirmation with no new price
+      // structure behind it) - but TTTF/DTTF/STTF is exempt, since full RSI
+      // divergence requires a genuinely NEW price extreme with RSI failing
+      // to confirm it (detectRSIDivergence) to fire at all. A second full-
+      // confluence signal later in the day already IS the proof of a fresh
+      // pullback-and-turn; gating it on the histogram too would risk
+      // blocking a legitimate high-confidence re-entry during a strong,
+      // persistently one-sided trend day where the histogram simply never
+      // dips back through zero.
       //
-      // ORB gets a second, narrower exemption on top of that: a high-
+      // DIV added to this gate 2026-07-17 (was missing since DIV shipped -
+      // it's a "pre-confirmation" tier, RSI divergence + histogram
+      // deceleration WITHOUT a completed MACD crossover, so it doesn't get
+      // TTF-family's full protection): found live re-firing 3x on QQQ and
+      // 3x on IWM within a 12-minute stretch of tight chop (both symbols
+      // moving under a 0.25% band the whole time), each entry stopped out
+      // by 0DTE leverage before the next one, no real price structure
+      // behind any of the re-entries. No high-confidence exemption for DIV,
+      // same reasoning as IV - it's still noise no matter how high the
+      // number reads.
+      //
+      // ORB gets a second, narrower exemption on top of the gate: a high-
       // confidence (>=85%) continuation is allowed to bypass the reset gate
       // too - the exact supertrend-day case (up all day, down all day, no
       // real reversal) where waiting for a histogram flatten could mean
-      // never re-entering a trend that's still very much intact. IV keeps no
-      // such exemption at any confidence - it's a reversal-at-a-level thesis,
-      // and re-firing at the same static level without a real change is
-      // still noise no matter how high the number reads.
+      // never re-entering a trend that's still very much intact. IV and DIV
+      // keep no such exemption at any confidence - both are reversal/early-
+      // momentum theses, and re-firing without a real change is still noise
+      // no matter how high the number reads.
       const ttfStatus = leg.day_trade_alerts?.ttf_status
       const orbHighConfidenceContinuation = ttfStatus === 'ORB' && confidence >= ORB_HIGH_CONFIDENCE_CONTINUATION_THRESHOLD
-      if ((ttfStatus === 'IV' || ttfStatus === 'ORB') && !orbHighConfidenceContinuation) {
+      if ((ttfStatus === 'IV' || ttfStatus === 'ORB' || ttfStatus === 'DIV') && !orbHighConfidenceContinuation) {
         const { data: lastClosedRows, error: lastClosedError } = await supabase
           .from('option_positions')
           .select('closed_at')
