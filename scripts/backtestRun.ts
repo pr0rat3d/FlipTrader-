@@ -108,7 +108,18 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
 const SIM_STARTING_EQUITY = 2000
 const MARGIN_MULTIPLIER = 2
 const SIM_RISK_PCT = 0.10
-const SIM_MIN_EQUITY = 500
+// Was 500, mirroring the live execution_settings.min_account_equity value -
+// found live 2026-07-17 the SAME catch-22 exists at the lower bound: the
+// corrected (unlimited-ceiling) baseline still crossed below $500 on
+// 2026-06-16 after a brutal losing stretch and went completely silent for
+// the last month of the 90-day window, with no way to recover without a
+// trade it could no longer place. A hard floor with no recovery path isn't
+// a risk control, it's a dead end - the daily-loss circuit breaker (see
+// dailyLossLimitPct below) is the intentional, recoverable version of this
+// same protection. Dropped to a nominal $1 sanity check (rejects truly
+// nonsensical/negative equity, not a real barrier in practice), matching
+// the live value.
+const SIM_MIN_EQUITY = 1
 // Was 5000, mirroring the live execution_settings.max_account_equity value -
 // found live 2026-07-17 that computeContractCount's upper-band check has no
 // recovery mechanism: once equity crosses the ceiling, EVERY future entry
