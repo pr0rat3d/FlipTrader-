@@ -49,13 +49,13 @@
 import { mkdirSync, writeFileSync } from 'fs'
 import { Candle } from '../server/twelvedata.js'
 import { fetchIntradayHistory, fetchDailyHistory } from '../server/backtest/fetchHistory.js'
-import { dailyLevelsAsOf, openingRangeFor, supportResistanceLevelsAsOf } from '../server/backtest/replayHelpers.js'
+import { dailyLevelsAsOf, openingRangeFor, supportResistanceLevelsAsOf, sessionVWAPFor } from '../server/backtest/replayHelpers.js'
 import { analyzeCandles } from '../server/indicators.js'
 import { calculateATR, calculateMACD } from '../src/lib/technicalIndicators.js'
 import { detectIVSignal } from '../server/signalDetection.js'
 import { detectCandlestickPattern } from '../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
-import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
+import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, isIntradayVwapAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
 import { deriveMilestonePrices, applyPriceSample, checkExpiry, ProfitTargetRow } from '../server/alertOutcomes.js'
 import { nyDateKey } from '../server/marketHours.js'
 import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition } from '../server/backtest/optionPnlSimulator.js'
@@ -211,6 +211,7 @@ const parseArgs = () => {
   const maxDailyEntries = get('--max-daily-entries')
   const chopStart = get('--chop-start') // "HH:MM" ET, e.g. "10:00"
   const chopEnd = get('--chop-end')
+  const orbIntradayVwapGate = args.includes('--orb-intraday-vwap-gate')
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -224,13 +225,15 @@ const parseArgs = () => {
     maxDailyEntries: maxDailyEntries ? parseInt(maxDailyEntries, 10) : Infinity,
     chopZoneStartMinutes: chopStart ? toMinutes(chopStart) : undefined,
     chopZoneEndMinutes: chopEnd ? toMinutes(chopEnd) : undefined,
+    orbIntradayVwapGate,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
+  console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`Strategy: hard-stop=${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}% | tier-plan=${tierPlanLabel} | max-daily-entries=${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries} | chop-zone=${chopLabel}`)
 
   // Extra lookback before `start` so daily EMA200 and the intraday rolling
@@ -596,7 +599,10 @@ const main = async () => {
         const candidates = perSymbolSignals.filter(s => qualifyingSymbols.includes(s.symbol))
         const representative = candidates.find(s => s.symbol === 'SPY') || candidates[0]
         const dailyLevels = dailyLevelsAsOf(dailyCandles[representative.symbol], dailyAsOf(representative.symbol))
-        if (!isDailyTrendAligned(direction, dailyLevels?.dailyEma50 ?? null, dailyLevels?.dailyEma200 ?? null)) continue
+        const dailyAligned = isDailyTrendAligned(direction, dailyLevels?.dailyEma50 ?? null, dailyLevels?.dailyEma200 ?? null)
+        const intradayAligned = orbIntradayVwapGate &&
+          isIntradayVwapAligned(direction, representative.entryPrice, sessionVWAPFor(representative.sessionCandlesSoFar))
+        if (!dailyAligned && !intradayAligned) continue
 
         const patternMatch = detectCandlestickPattern(representative.sessionCandlesSoFar)
         const confidence = applyConfidenceModifiers(orbBaseConfidence(qualifyingSymbols.length), {
@@ -684,7 +690,7 @@ const main = async () => {
     console.log(`  ${reason}: ${count}`)
   }
 
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}${orbIntradayVwapGate ? '_orbvwap' : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`

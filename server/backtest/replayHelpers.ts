@@ -48,6 +48,24 @@ export const openingRangeFor = (sessionCandlesSoFar: Candle[]): { orh: number; o
   }
 }
 
+// Same math as vwap.ts's calculateSessionVWAP, but takes candles already
+// filtered to a single session instead of filtering by nyDateKey(new Date())
+// internally - same reason as openingRangeFor above.
+export const sessionVWAPFor = (sessionCandlesSoFar: Candle[]): number | null => {
+  if (sessionCandlesSoFar.length === 0) return null
+
+  let cumulativeTypicalVolume = 0
+  let cumulativeVolume = 0
+  for (const candle of sessionCandlesSoFar) {
+    const typicalPrice = (candle.high + candle.low + candle.close) / 3
+    cumulativeTypicalVolume += typicalPrice * candle.volume
+    cumulativeVolume += candle.volume
+  }
+  if (cumulativeVolume === 0) return null
+
+  return cumulativeTypicalVolume / cumulativeVolume
+}
+
 // Composes the two helpers above plus detectGap (already pure/reusable
 // as-is from supportResistance.ts) into the exact same shape
 // getSupportResistanceLevels returns live - for IV detection's replay.

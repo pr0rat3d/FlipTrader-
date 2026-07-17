@@ -71,6 +71,32 @@ export const isDailyTrendAligned = (
   return (direction === 'bullish') === dailyTrendBullish
 }
 
+// Alternative trend gate proposed 2026-07-16, after a live session where
+// SPY/QQQ/IWM spent from 12:05pm ET onward in a persistent stair-step
+// decline - a real, clean bearish ORB continuation candidate existed
+// almost the entire stretch (breakout below the opening range + bearish
+// MACD curl agreement) and was blocked every single time by
+// isDailyTrendAligned, since the DAILY EMA50/200 reflected a firm
+// multi-month uptrend having nothing to do with today's realized move.
+// isDailyTrendAligned isn't wrong - the "especially on supertrend days"
+// thesis is real - but it's the only path in, so a session that reverses
+// against the longer trend gets no ORB continuation trade at all, no
+// matter how clean the intraday structure looks.
+//
+// This checks today's realized trend instead: session VWAP, the standard
+// intraday "fair value" reference (already used live in scan-confluence.ts/
+// scan-day-trades.ts, not a new concept introduced just for this). Meant to
+// be OR'd with isDailyTrendAligned, not replace it - either a supertrend day
+// OR a genuine intraday trend day should qualify.
+export const isIntradayVwapAligned = (
+  direction: 'bullish' | 'bearish',
+  currentPrice: number,
+  sessionVwap: number | null
+): boolean => {
+  if (sessionVwap === null) return false
+  return direction === 'bullish' ? currentPrice > sessionVwap : currentPrice < sessionVwap
+}
+
 // Mirrors TTTF/DTTF/STTF and IV's existing index-count-scaling convention - a
 // starting point between IV's tiers and full TTTF, adjustable once real data
 // comes in via the Confidence Calibration page.
