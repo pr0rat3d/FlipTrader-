@@ -94,6 +94,17 @@ export const modeledPremiumAt = (position: Pick<SimPosition, 'strike' | 'contrac
 export interface StrategyOverrides {
   tierPlanFn?: (contracts: number) => TierSpec[]
   hardStopPct?: number
+  // Per-signal-type stop override, checked before the flat hardStopPct -
+  // added 2026-07-17 to test whether momentum/continuation signals (ORB)
+  // need more room than reversal signals (IV, DTTF/TTTF/STTF) to survive a
+  // normal pullback/consolidation before the hard stop fires. Found live:
+  // a 0.88-confidence ORB entry on SPY stopped out on a mere ~0.14%
+  // underlying range (pure chop, not a reversal) because 0DTE gamma
+  // amplifies even flat price action into a double-digit percent swing on
+  // premium - confirmation-based entries land close to a local extreme by
+  // construction, so they're more exposed to this than reversal entries,
+  // where a fast adverse move is usually real evidence the thesis failed.
+  hardStopPctByType?: Record<string, number>
 }
 
 export const openPosition = (
@@ -102,7 +113,8 @@ export const openPosition = (
 ): SimPosition => ({
   id, ttfStatus, symbol, direction,
   contractType: entry.contractType, strike: entry.strike, contracts: entry.contracts, remaining: entry.contracts,
-  entryPremium: entry.entryPremium, entryTimeIso, sigma: entry.sigma, stopPct: overrides.hardStopPct ?? HARD_STOP_PCT_DEFAULT,
+  entryPremium: entry.entryPremium, entryTimeIso, sigma: entry.sigma,
+  stopPct: overrides.hardStopPctByType?.[ttfStatus] ?? overrides.hardStopPct ?? HARD_STOP_PCT_DEFAULT,
   tiers: (overrides.tierPlanFn ?? tierPlanFor)(entry.contracts), filledTierCount: 0, fills: [], status: 'open', closedAtIso: null, realizedPnl: 0
 })
 
