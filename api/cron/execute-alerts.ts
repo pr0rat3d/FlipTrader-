@@ -7,7 +7,8 @@ import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import {
   computeContractCount, tierPlanFor, ContractSizeSettings,
-  FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES
+  FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES,
+  RISK_PCT_MULTIPLIER_BY_TYPE, DEFAULT_RISK_PCT_MULTIPLIER
 } from '../../server/execution/optionPositionSizing.js'
 import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import { suggestOptionStrike } from '../../src/lib/optionSuggestion.js'
@@ -68,6 +69,21 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
   STTF: 0.65,
   IV: 0.80
 }
+
+// Signal-mix rebalance, shipped 2026-07-17/18 after a 90-day uncensored
+// backtest (see optionPositionSizing.ts's RISK_PCT_MULTIPLIER_BY_TYPE
+// comment for the equity-band bug that corrupted every earlier read of
+// this data) showed nine different confidence/timing/sizing variants for
+// ORB and IV all landing within a ~$70 band of a ~-$2,000 total loss - no
+// gate or filter moved the needle, because the shared capital pool just
+// reabsorbed whatever got freed up. Disabling ORB/IV/STTF entirely (not
+// just gating them tighter) turned the same 90-day window into +$1,367 -
+// DIV alone accounts for nearly all of that, DTTF/TTTF net close to
+// breakeven, ORB/IV/STTF were the consistent drags. This is a live signal-
+// mix decision, not a confidence-floor tweak - kept as its own set for
+// clarity even though the floors above still exist for ORB/IV/STTF (in
+// case this ever gets reverted, their calibration is still there).
+const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF'])
 
 // A profit_targets leg stays status='open' (and so eligible here) for as
 // long as the underlying hasn't technically touched its own ATR-based
@@ -248,6 +264,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const leg of legs as unknown as OpenLeg[]) {
       if (entriesToday >= settingsRow.max_daily_entries) break
       if (alreadyClaimed.has(leg.id)) continue
+      if (DISABLED_SIGNAL_TYPES.has(leg.day_trade_alerts?.ttf_status ?? '')) continue
 
       const legAgeMinutes = (Date.now() - new Date(leg.entry_time).getTime()) / 60_000
       if (legAgeMinutes > LEG_STALENESS_CUTOFF_MINUTES) continue
@@ -406,10 +423,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           continue
         }
 
+        const riskPctMultiplier = RISK_PCT_MULTIPLIER_BY_TYPE[ttfStatus ?? ''] ?? DEFAULT_RISK_PCT_MULTIPLIER
         const sizeResult = computeContractCount({
           accountEquity: account.equity,
           buyingPower: account.buying_power,
-          riskPct: settingsRow.risk_pct,
+          riskPct: settingsRow.risk_pct * riskPctMultiplier,
           premiumAsk: quote.ask
         }, sizeSettings)
 

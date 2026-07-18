@@ -103,6 +103,27 @@ export type ContractSizeResult =
   | { ok: true; contracts: number }
   | { ok: false; reason: ContractSizeRejectReason }
 
+// Rebalances capital priority across signal types - proposed 2026-07-17
+// after a 90-day uncensored backtest showed the same ~-$2,000 total loss
+// persisted across nine different confidence/timing variants, no matter
+// which signal type absorbed the damage. DIV and TTTF were the only two
+// types showing real, durable edge at scale in every variant tested; ORB
+// (worst raw signal-level win rate of all six, 25.8%, yet the LOWEST/most
+// permissive confidence floor) and IV (same ~50%-of-trades-get-zero-
+// traction shape as ORB) were the consistent drags. Rather than gating
+// them off entirely - they do occasionally deliver - this halves their
+// position size instead, so a bad ORB/IV trade costs proportionally less
+// while DIV/TTTF/DTTF/STTF keep full-size access to the shared capital
+// pool. MIN_CONTRACTS=2 is still a hard floor underneath this (unrelated
+// to risk-sizing - you can't scale out of 1 contract), so this mostly
+// shows up as ORB/IV landing on the 2-contract floor more often instead
+// of sizing up toward 5, not as a total block.
+export const RISK_PCT_MULTIPLIER_BY_TYPE: Record<string, number> = {
+  ORB: 0.5,
+  IV: 0.5
+}
+export const DEFAULT_RISK_PCT_MULTIPLIER = 1.0
+
 // Budget is riskPct of BUYING POWER, not equity - found live 2026-07-15 that
 // equity*riskPct (1%) produced a budget ($20 on a $2000 account) smaller than
 // almost any real option's cost (premium x 100), so `desired` was always ~0

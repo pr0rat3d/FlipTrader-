@@ -61,7 +61,7 @@ import { nyDateKey } from '../server/marketHours.js'
 import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition } from '../server/backtest/optionPnlSimulator.js'
 import {
   MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, TierSpec,
-  RUNNER_TIER_NUMBER, RUNNER_TARGET_PCT
+  RUNNER_TIER_NUMBER, RUNNER_TARGET_PCT, RISK_PCT_MULTIPLIER_BY_TYPE, DEFAULT_RISK_PCT_MULTIPLIER
 } from '../server/execution/optionPositionSizing.js'
 import { nyMinutesSinceMidnight } from '../server/rvol.js'
 
@@ -236,6 +236,13 @@ const parseArgs = () => {
   const orbStopPct = get('--orb-stop-pct') // e.g. "0.25" - wider stop for ORB only, everything else keeps the flat hard-stop-pct
   const maxDailyCapital = get('--max-daily-capital') // dollars, e.g. "2000" - replaces max-daily-entries entirely when set
   const dailyLossLimit = get('--daily-loss-limit-pct') // e.g. "0.15" - pause new entries once today's realized loss hits this fraction of the day's starting equity
+  const orbMinConfidence = get('--orb-min-confidence') // e.g. "0.75" - overrides ORB's 0.60 floor specifically, everything else unchanged
+  const quietOpenUntil = get('--quiet-open-until') // "HH:MM" ET, e.g. "10:30" - blocks new IV/ORB entries before this time, everything else unchanged
+  const quarterHourDiscount = get('--quarter-hour-confidence-discount') // e.g. "0.05" - lowers min confidence by this much for entries firing exactly on :00/:30, ALL types
+  const orbQuarterHourDiscountArg = get('--orb-quarter-hour-discount') // e.g. "0.10" - same discount, ORB only, IV/others unaffected
+  const rebalanceCapitalPriorityArg = args.includes('--rebalance-capital-priority') // halves ORB/IV position size (RISK_PCT_MULTIPLIER_BY_TYPE), DIV/TTTF/DTTF/STTF unaffected
+  const disableTypesArg = get('--disable-types') // e.g. "ORB,IV" - removes these signal types from the rotation entirely
+  const quarterHourFilter = get('--quarter-hour-entry-filter-minutes') // e.g. "3" - hard filter, only allow entries within N minutes of a :00/:30 mark
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -254,15 +261,30 @@ const parseArgs = () => {
     orbStopPctLabel: orbStopPct ?? 'same-as-global',
     maxDailyCapitalBudget: maxDailyCapital ? parseFloat(maxDailyCapital) : undefined,
     dailyLossLimitPct: dailyLossLimit ? parseFloat(dailyLossLimit) : undefined,
+    orbMinConfidenceOverride: orbMinConfidence ? parseFloat(orbMinConfidence) : undefined,
+    quietOpenUntilMinutes: quietOpenUntil ? toMinutes(quietOpenUntil) : undefined,
+    quietOpenUntilLabel: quietOpenUntil ?? 'off',
+    quarterHourConfidenceDiscount: quarterHourDiscount ? parseFloat(quarterHourDiscount) : undefined,
+    orbQuarterHourDiscount: orbQuarterHourDiscountArg ? parseFloat(orbQuarterHourDiscountArg) : undefined,
+    rebalanceCapitalPriority: rebalanceCapitalPriorityArg,
+    disabledTypes: disableTypesArg ? new Set(disableTypesArg.split(',').map(s => s.trim())) : undefined,
+    disabledTypesLabel: disableTypesArg ?? 'none',
+    quarterHourEntryFilterMinutes: quarterHourFilter ? parseInt(quarterHourFilter, 10) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
+  console.log(`ORB min-confidence override: ${orbMinConfidenceOverride !== undefined ? orbMinConfidenceOverride : 'default (0.60)'}`)
+  console.log(`Quiet-open window (blocks new IV/ORB entries before this time): ${quietOpenUntilLabel}`)
+  console.log(`Quarter-hour (:00/:30) confidence discount: ${quarterHourConfidenceDiscount !== undefined ? quarterHourConfidenceDiscount : 'off'}`)
+  console.log(`Quarter-hour (:00/:30) hard entry filter: ${quarterHourEntryFilterMinutes !== undefined ? `within ${quarterHourEntryFilterMinutes}min` : 'off'}`)
+  console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
+  console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
   console.log(`Daily loss circuit breaker: ${dailyLossLimitPct !== undefined ? `ON (${(dailyLossLimitPct * 100).toFixed(0)}% of day's starting equity)` : 'OFF'}`)
   console.log(`Strategy: hard-stop=${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}% | tier-plan=${tierPlanLabel} | max-daily-entries=${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries} | chop-zone=${chopLabel}`)
@@ -416,6 +438,12 @@ const main = async () => {
     const dayKey = nyDateKey(t)
 
     if (minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) return skip('past_force_close')
+    // Harder version of the capital-priority rebalance: instead of halving
+    // ORB/IV's position size (found 2026-07-17 that the shared-capital-pool
+    // just reabsorbed the freed buying power as MORE ORB/IV entries,
+    // leaving total P&L unchanged), remove them from the rotation entirely.
+    // Opt-in via --disable-types SYMBOL,SYMBOL.
+    if (disabledTypes?.has(ttfStatus)) return skip('type_disabled')
     if (dailyLossLimitPct !== undefined) {
       const startOfDay = startOfDayEquityByDay.get(dayKey) ?? simEquity
       if (simEquity <= startOfDay * (1 - dailyLossLimitPct)) {
@@ -424,7 +452,50 @@ const main = async () => {
       }
     }
     if (maxDailyCapitalBudget === undefined && (entriesByDay.get(dayKey) ?? 0) >= maxDailyEntries) return skip('max_daily_entries')
-    const minConfidence = MIN_CONFIDENCE_BY_TYPE[ttfStatus] ?? GLOBAL_MIN_CONFIDENCE
+    // Found live 2026-07-17: both IV and ORB show the identical shape at
+    // scale - their highest-volume entry hour (10am ET, right as IV's own
+    // eligibility gate opens and shortly after ORB's opening-range window
+    // closes) is also consistently their WORST hour, while 3pm is
+    // consistently their best. ~50% of trades in both signals get zero
+    // favorable movement before stopping out - a "caught the tail end of
+    // the open's whipsaw" pattern, not a signal-quality issue specific to
+    // either one. Opt-in via --quiet-open-until, scoped to IV/ORB only
+    // (the two types that showed this pattern) - everything else unchanged.
+    if (quietOpenUntilMinutes !== undefined && (ttfStatus === 'IV' || ttfStatus === 'ORB') && minutesNow < quietOpenUntilMinutes) {
+      return skip('quiet_open_window')
+    }
+    // Harder version of the same idea: instead of a confidence discount,
+    // require entries to fire within N minutes of a :00/:30 mark at all -
+    // everything outside that window gets skipped regardless of
+    // confidence. Mutually exclusive with the discount variant in
+    // practice (test one or the other), both opt-in.
+    if (quarterHourEntryFilterMinutes !== undefined) {
+      const distanceToMark = Math.min(minutesNow % 30, 30 - (minutesNow % 30))
+      if (distanceToMark > quarterHourEntryFilterMinutes) return skip('outside_quarter_hour_window')
+    }
+    const baseMinConfidence = (ttfStatus === 'ORB' && orbMinConfidenceOverride !== undefined) ? orbMinConfidenceOverride : (MIN_CONFIDENCE_BY_TYPE[ttfStatus] ?? GLOBAL_MIN_CONFIDENCE)
+    // Found live 2026-07-17: bars starting exactly on the half-hour (:30)
+    // average 20% more range than a random minute, and top-of-hour (:00)
+    // about 10% more - consistent with institutional VWAP/TWAP execution
+    // schedules and other scheduled order flow conventionally sliced to
+    // those marks specifically (quarter-hours :15/:45 showed no
+    // measurable difference from any other minute - not part of this).
+    // Hypothesis: a signal firing exactly at one of these marks is more
+    // likely riding real, scheduled flow rather than noise, so it can
+    // earn a small confidence discount rather than needing the full bar.
+    //
+    // Two opt-in variants: --quarter-hour-confidence-discount applies to
+    // EVERY type equally (found 2026-07-17 this flips ORB positive,
+    // +$191 vs -$2,426, but tanks IV, -$1,978 vs -$16, via the same
+    // shared-capital-cascade effect seen all day). --orb-quarter-hour-
+    // discount scopes the same discount to ORB only, leaving IV (and
+    // everything else) at its normal bar everywhere - avoids feeding
+    // freed-up capital into a type that gets worse with more room to fire.
+    const onHalfHourMark = minutesNow % 30 === 0
+    const applicableDiscount = (ttfStatus === 'ORB' && orbQuarterHourDiscount !== undefined) ? orbQuarterHourDiscount
+      : quarterHourConfidenceDiscount !== undefined ? quarterHourConfidenceDiscount
+      : undefined
+    const minConfidence = (onHalfHourMark && applicableDiscount !== undefined) ? Math.max(0, baseMinConfidence - applicableDiscount) : baseMinConfidence
     if (confidence < minConfidence) return skip('below_min_confidence')
     if (ttfStatus === 'IV' && minutesNow < MARKET_OPEN_MINUTES_ET + IV_ELIGIBLE_AFTER_MINUTES) return skip('iv_too_early')
 
@@ -460,8 +531,9 @@ const main = async () => {
 
     const volWindow = intradayCandles[symbol].slice(Math.max(0, globalIndex - VOL_WINDOW_BARS + 1), globalIndex + 1).map(c => c.close)
     const buyingPower = simEquity * MARGIN_MULTIPLIER - committedCapital
+    const riskPctMultiplier = rebalanceCapitalPriority ? (RISK_PCT_MULTIPLIER_BY_TYPE[ttfStatus] ?? DEFAULT_RISK_PCT_MULTIPLIER) : 1.0
     const priced = priceEntry(direction, entryPrice, target50EMA, t, volWindow, {
-      equity: simEquity, buyingPower, riskPct: SIM_RISK_PCT, minEquity: SIM_MIN_EQUITY, maxEquity: SIM_MAX_EQUITY
+      equity: simEquity, buyingPower, riskPct: SIM_RISK_PCT * riskPctMultiplier, minEquity: SIM_MIN_EQUITY, maxEquity: SIM_MAX_EQUITY
     })
     if (!priced.ok) return skip(priced.reason)
 
@@ -776,7 +848,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
