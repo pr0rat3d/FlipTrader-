@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { Candle } from '../twelvedata.js'
 
 // Without this, a hung upstream request waits indefinitely (no client-side
 // cutoff) and can single-handedly blow through a cron's maxDuration - this bit
@@ -196,6 +197,45 @@ export const getBars1Min = async (symbol: string, start: Date, end: Date): Promi
     return response.data?.bars ?? []
   } catch (error) {
     console.error(`Error fetching 1-min bars for ${symbol}:`, error)
+    return null
+  }
+}
+
+// Live 5-min bars for scan-mag7-iv.ts - deliberately a separate data source
+// from twelvedata.ts (used by scan-confluence.ts/scan-day-trades.ts/
+// scan-swings.ts), which is already fully committed against its own
+// 8-credit/min, 800/day free-tier budget. Alpaca's data API has its own,
+// much larger budget (confirmed empirically 2026-07-20: 200 req/window via
+// the response's x-ratelimit-limit header) and is already proven reliable
+// all week for backtest history - this is the same feed, just for live/
+// recent bars instead of a historical range. `feed=iex` confirmed free/
+// unrestricted at any recency (checked repeatedly this week; the SIP feed
+// 403s on recent dates without a paid subscription, IEX doesn't).
+const toCandle = (b: AlpacaBar): Candle => ({
+  open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v, datetime: b.t
+})
+
+export const getBars5Min = async (symbol: string, lookbackBars: number = 300): Promise<Candle[] | null> => {
+  try {
+    const end = new Date()
+    // ~7 calendar days covers 300 5-min regular-session bars even across a
+    // weekend/holiday gap, same margin twelvedata.ts's equivalent uses.
+    const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
+    const response = await http.get(`${dataBaseUrl()}/v2/stocks/${symbol}/bars`, {
+      headers: tradingHeaders(),
+      params: {
+        timeframe: '5Min',
+        start: start.toISOString(),
+        end: end.toISOString(),
+        feed: 'iex',
+        limit: lookbackBars,
+        sort: 'asc'
+      }
+    })
+    const bars: AlpacaBar[] = response.data?.bars ?? []
+    return bars.map(toCandle)
+  } catch (error) {
+    console.error(`Error fetching 5-min bars for ${symbol}:`, error)
     return null
   }
 }

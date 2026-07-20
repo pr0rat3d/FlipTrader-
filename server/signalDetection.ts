@@ -111,3 +111,66 @@ export const detectIVSignal = (
 
   return { confluenceType, confluenceLevel, confidence }
 }
+
+// Deliberately NOT detectIVSignal reused with indicesTriggered=[symbol] -
+// that function hard-requires 2+ agreeing indices (indicesTriggered.length
+// < 2 returns null) because SPY/QQQ/IWM's confluence thesis is that
+// structural correlation across the trio is itself part of the signal.
+// Individual stocks (Mag7 scanner, added 2026-07-20) don't share that
+// correlation - AAPL and TSLA can easily move in opposite directions the
+// same day - so porting the "N of M agree" requirement wouldn't mean the
+// same thing here. This evaluates ONE symbol entirely on its own technical
+// levels, with no cross-symbol corroboration to lean on - by design, that
+// makes it a less-corroborated read than the SPY/QQQ/IWM version, so it's
+// capped at the SAME confidence ceiling used for the weakest (single-index)
+// tier there (0.7x scale) rather than assuming full 1.0x reliability just
+// because the underlying level-touch logic is identical.
+const SINGLE_SYMBOL_CONFIDENCE_SCALE = 0.7
+
+export const detectSingleSymbolIVSignal = (
+  direction: 'bullish' | 'bearish',
+  currentPrice: number,
+  levels: SupportResistanceLevels,
+  candles: Candle[],
+  tolerance: number = DEFAULT_TOLERANCE
+): IVSignalResult | null => {
+  let confluenceType: ConfluenceType | null = null
+  let confluenceLevel: number | null = null
+  let confidence = 0
+
+  if (direction === 'bullish') {
+    if (testedAndReclaimed(candles, levels.pdl, currentPrice, 'low')) {
+      confluenceType = 'pdl_bounce'
+      confluenceLevel = levels.pdl
+      confidence = 0.85
+    } else if (isNear(currentPrice, levels.orl, tolerance)) {
+      confluenceType = 'or_rejection'
+      confluenceLevel = levels.orl
+      confidence = 0.7
+    } else if (levels.gapDown && isNear(currentPrice, levels.pdc, tolerance)) {
+      confluenceType = 'gap_fill_target'
+      confluenceLevel = levels.pdc
+      confidence = 0.65
+    }
+  } else {
+    if (testedAndReclaimed(candles, levels.pdh, currentPrice, 'high')) {
+      confluenceType = 'pdh_rejection'
+      confluenceLevel = levels.pdh
+      confidence = 0.85
+    } else if (isNear(currentPrice, levels.orh, tolerance)) {
+      confluenceType = 'or_rejection'
+      confluenceLevel = levels.orh
+      confidence = 0.7
+    } else if (levels.gapUp && isNear(currentPrice, levels.pdc, tolerance)) {
+      confluenceType = 'gap_fill_target'
+      confluenceLevel = levels.pdc
+      confidence = 0.65
+    }
+  }
+
+  if (!confluenceType || confluenceLevel === null) return null
+
+  confidence *= SINGLE_SYMBOL_CONFIDENCE_SCALE
+
+  return { confluenceType, confluenceLevel, confidence }
+}
