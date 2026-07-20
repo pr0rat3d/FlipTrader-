@@ -237,6 +237,7 @@ const parseArgs = () => {
   const maxDailyCapital = get('--max-daily-capital') // dollars, e.g. "2000" - replaces max-daily-entries entirely when set
   const dailyLossLimit = get('--daily-loss-limit-pct') // e.g. "0.15" - pause new entries once today's realized loss hits this fraction of the day's starting equity
   const orbMinConfidence = get('--orb-min-confidence') // e.g. "0.75" - overrides ORB's 0.60 floor specifically, everything else unchanged
+  const divMinConfidence = get('--div-min-confidence') // e.g. "0.55" - overrides DIV's fallback-to-global 0.65 floor specifically, everything else unchanged
   const quietOpenUntil = get('--quiet-open-until') // "HH:MM" ET, e.g. "10:30" - blocks new IV/ORB entries before this time, everything else unchanged
   const quarterHourDiscount = get('--quarter-hour-confidence-discount') // e.g. "0.05" - lowers min confidence by this much for entries firing exactly on :00/:30, ALL types
   const orbQuarterHourDiscountArg = get('--orb-quarter-hour-discount') // e.g. "0.10" - same discount, ORB only, IV/others unaffected
@@ -262,6 +263,7 @@ const parseArgs = () => {
     maxDailyCapitalBudget: maxDailyCapital ? parseFloat(maxDailyCapital) : undefined,
     dailyLossLimitPct: dailyLossLimit ? parseFloat(dailyLossLimit) : undefined,
     orbMinConfidenceOverride: orbMinConfidence ? parseFloat(orbMinConfidence) : undefined,
+    divMinConfidenceOverride: divMinConfidence ? parseFloat(divMinConfidence) : undefined,
     quietOpenUntilMinutes: quietOpenUntil ? toMinutes(quietOpenUntil) : undefined,
     quietOpenUntilLabel: quietOpenUntil ?? 'off',
     quarterHourConfidenceDiscount: quarterHourDiscount ? parseFloat(quarterHourDiscount) : undefined,
@@ -275,11 +277,12 @@ const parseArgs = () => {
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
   console.log(`ORB min-confidence override: ${orbMinConfidenceOverride !== undefined ? orbMinConfidenceOverride : 'default (0.60)'}`)
+  console.log(`DIV min-confidence override: ${divMinConfidenceOverride !== undefined ? divMinConfidenceOverride : 'default (fallback to global 0.65)'}`)
   console.log(`Quiet-open window (blocks new IV/ORB entries before this time): ${quietOpenUntilLabel}`)
   console.log(`Quarter-hour (:00/:30) confidence discount: ${quarterHourConfidenceDiscount !== undefined ? quarterHourConfidenceDiscount : 'off'}`)
   console.log(`Quarter-hour (:00/:30) hard entry filter: ${quarterHourEntryFilterMinutes !== undefined ? `within ${quarterHourEntryFilterMinutes}min` : 'off'}`)
@@ -473,7 +476,9 @@ const main = async () => {
       const distanceToMark = Math.min(minutesNow % 30, 30 - (minutesNow % 30))
       if (distanceToMark > quarterHourEntryFilterMinutes) return skip('outside_quarter_hour_window')
     }
-    const baseMinConfidence = (ttfStatus === 'ORB' && orbMinConfidenceOverride !== undefined) ? orbMinConfidenceOverride : (MIN_CONFIDENCE_BY_TYPE[ttfStatus] ?? GLOBAL_MIN_CONFIDENCE)
+    const baseMinConfidence = (ttfStatus === 'ORB' && orbMinConfidenceOverride !== undefined) ? orbMinConfidenceOverride
+      : (ttfStatus === 'DIV' && divMinConfidenceOverride !== undefined) ? divMinConfidenceOverride
+      : (MIN_CONFIDENCE_BY_TYPE[ttfStatus] ?? GLOBAL_MIN_CONFIDENCE)
     // Found live 2026-07-17: bars starting exactly on the half-hour (:30)
     // average 20% more range than a random minute, and top-of-hour (:00)
     // about 10% more - consistent with institutional VWAP/TWAP execution
@@ -848,7 +853,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
