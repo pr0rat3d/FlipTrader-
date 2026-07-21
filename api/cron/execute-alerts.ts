@@ -251,17 +251,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ success: true, processed: 0 })
     }
 
+    // Filter out disabled types BEFORE building the dedup id list below, not
+    // just in the per-leg loop further down - found live 2026-07-21: a
+    // disabled type still gets detected and inserted into profit_targets
+    // forever (scan-confluence.ts has no idea execute-alerts.ts is ignoring
+    // it), so with nothing ever claiming or closing those legs out, IV alone
+    // (firing ~3 legs/min all session) had piled up to 700+ open legs in a
+    // single day. The .in('profit_target_id', ids) query below serializes
+    // that id list into the request URL - at 700 ids (~26,000 chars) Supabase
+    // started rejecting it outright with a bare "Bad Request", which took
+    // execute-alerts.ts down entirely (every single run 500'd) since this
+    // query runs before any leg-level logic, including for eligible types.
+    // Shrinking the list to only types that can actually execute keeps this
+    // query's size bounded by real trading activity instead of disabled
+    // types' unbounded detection volume.
+    const eligibleLegs = (legs as unknown as OpenLeg[]).filter(l => !DISABLED_SIGNAL_TYPES.has(l.day_trade_alerts?.ttf_status ?? ''))
+    if (eligibleLegs.length === 0) {
+      return res.status(200).json({ success: true, processed: 0 })
+    }
+
     const { data: existing, error: existingError } = await supabase
       .from('option_positions')
       .select('profit_target_id')
-      .in('profit_target_id', legs.map((l: any) => l.id))
+      .in('profit_target_id', eligibleLegs.map(l => l.id))
     if (existingError) throw existingError
     const alreadyClaimed = new Set((existing || []).map((e: any) => e.profit_target_id))
 
     let processed = 0
     let entered = 0
 
-    for (const leg of legs as unknown as OpenLeg[]) {
+    for (const leg of eligibleLegs) {
       if (entriesToday >= settingsRow.max_daily_entries) break
       if (alreadyClaimed.has(leg.id)) continue
       if (DISABLED_SIGNAL_TYPES.has(leg.day_trade_alerts?.ttf_status ?? '')) continue
