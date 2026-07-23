@@ -51,7 +51,7 @@ import { Candle } from '../server/twelvedata.js'
 import { fetchIntradayHistory, fetchDailyHistory } from '../server/backtest/fetchHistory.js'
 import { dailyLevelsAsOf, openingRangeFor, supportResistanceLevelsAsOf, sessionVWAPFor } from '../server/backtest/replayHelpers.js'
 import { analyzeCandles } from '../server/indicators.js'
-import { calculateATR, calculateMACD, calculateRSI } from '../src/lib/technicalIndicators.js'
+import { calculateATR, calculateMACD, calculateRSI, calculateADX } from '../src/lib/technicalIndicators.js'
 import { detectIVSignal } from '../server/signalDetection.js'
 import { detectCandlestickPattern } from '../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
@@ -183,6 +183,7 @@ interface PerSymbolBar {
   entryPrice: number
   target50EMA: number
   atr: number | null
+  adx: number | null
   sessionCandlesSoFar: Candle[]
   globalIndex: number
 }
@@ -276,6 +277,7 @@ const parseArgs = () => {
   const lastCallMinConfidence = get('--last-call-min-confidence') // e.g. "0.90" - carve-out: entries past the 3:45pm force-close cutoff are normally always blocked, but one at/above this confidence is let through anyway. Naturally bounded to the ~15min before market close since there's no bar data past 4pm.
   const divNoTrendModifierArg = args.includes('--div-no-trend-modifier') // Found live 2026-07-23: DIV is an anticipatory reversal thesis - the daily-trend-alignment bonus rewards it for agreeing with a lagging multi-month trend, which says nothing about whether THIS bar's dip actually reverses. Tests removing that bonus from DIV specifically, everything else (TTTF/DTTF/STTF/IV/ORB) unaffected.
   const mtfRsiModifierArg = args.includes('--mtf-rsi-modifier') // 2026-07-23: adds the multi-timeframe RSI confirmation modifier (see confidenceModifiers.ts) to TTTF/DTTF/STTF/DIV - the RSI-divergence-based family - scoped off IV/ORB which don't key off RSI divergence at all.
+  const divAdxTrendGate = get('--div-adx-trend-gate') // e.g. "25" - blocks new DIV entries when the representative symbol's own 14-period ADX is at/above this level (a real trend day underway), DIV only - everything else unaffected.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -308,12 +310,13 @@ const parseArgs = () => {
     lastCallMinConfidence: lastCallMinConfidence ? parseFloat(lastCallMinConfidence) : undefined,
     divNoTrendModifier: divNoTrendModifierArg,
     mtfRsiModifier: mtfRsiModifierArg,
+    divAdxTrendGate: divAdxTrendGate ? parseFloat(divAdxTrendGate) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -326,6 +329,7 @@ const main = async () => {
   console.log(`Last-call past-force-close carve-out: ${lastCallMinConfidence !== undefined ? `lets entries >= ${lastCallMinConfidence} confidence through after 3:45pm` : 'off (live default: hard block)'}`)
   console.log(`DIV daily-trend-alignment modifier: ${divNoTrendModifier ? 'OFF (removed for DIV only)' : 'on (live default)'}`)
   console.log(`Multi-timeframe RSI confirmation modifier: ${mtfRsiModifier ? 'ON (TTTF/DTTF/STTF/DIV)' : 'off (live default)'}`)
+  console.log(`DIV ADX trend-day gate: ${divAdxTrendGate !== undefined ? `blocks new DIV entries when ADX >= ${divAdxTrendGate}` : 'off (live default)'}`)
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
@@ -715,6 +719,16 @@ const main = async () => {
       if (!signal) continue
 
       const atrValues = calculateATR(window.map(c => c.high), window.map(c => c.low), closes, 14)
+      // Trend-day regime filter (2026-07-23, opt-in via --div-adx-trend-gate)
+      // - see confidenceModifiers.ts-adjacent reasoning: DIV's thesis is an
+      // anticipatory reversal off a decelerating MACD histogram, which reads
+      // identically whether it's a real turn or just a shallow pause inside
+      // a strong sustained trend (found live 2026-07-23: 10 straight bullish
+      // DIV entries into a real gap-down-and-continue morning, all stopped
+      // out). ADX measures trend STRENGTH regardless of direction - high
+      // ADX means "real trend underway," a different axis than the
+      // direction-based daily-EMA/MTF-RSI checks.
+      const adxValues = calculateADX(window.map(c => c.high), window.map(c => c.low), closes, 14)
       const dayKey = nyDateKey(t)
       const dayStart = dayStartIndex[symbol].get(dayKey) ?? gi
       const sessionCandlesSoFar = intradayCandles[symbol].slice(dayStart, gi + 1)
@@ -727,6 +741,7 @@ const main = async () => {
         entryPrice: signal.entryPrice,
         target50EMA: signal.target50EMA,
         atr: atrValues[atrValues.length - 1] ?? null,
+        adx: adxValues[adxValues.length - 1]?.adx ?? null,
         sessionCandlesSoFar,
         globalIndex: gi
       })
@@ -809,11 +824,17 @@ const main = async () => {
           higherTimeframeRsi: mtfRsiModifier ? higherTimeframeRsiAt(intradayCandles[representative.symbol], representative.globalIndex) : undefined
         })
 
+        // Phase 1 legs stay ungated regardless (matches every other flag in
+        // this file - Phase 1 is meant to show what fired regardless of
+        // whether the real bot would have traded it). Only Phase 2's real
+        // entry attempt is blocked on a trend day.
+        const adxTrendDayBlock = divAdxTrendGate !== undefined && representative.adx !== null && representative.adx >= divAdxTrendGate
+
         for (const s of divergent) {
           const leg = makeLeg('DIV', s.symbol, direction, confidence, now, s.entryPrice, s.target50EMA, s.atr)
           legs.push(leg)
           openLegsBySymbol[s.symbol].push(leg)
-          attemptGatedEntry('DIV', s.symbol, direction, confidence, now, s.entryPrice, s.target50EMA, s.globalIndex)
+          if (!adxTrendDayBlock) attemptGatedEntry('DIV', s.symbol, direction, confidence, now, s.entryPrice, s.target50EMA, s.globalIndex)
         }
       }
     }
@@ -965,7 +986,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`

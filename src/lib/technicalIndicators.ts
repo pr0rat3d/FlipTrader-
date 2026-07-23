@@ -1,4 +1,4 @@
-import { RSI, MACD, ATR } from 'technicalindicators'
+import { RSI, MACD, ATR, ADX } from 'technicalindicators'
 
 export const calculateRSI = (closes: number[], period: number = 14): number[] => {
   return RSI.calculate({ values: closes, period })
@@ -17,6 +17,14 @@ export const calculateMACD = (closes: number[]) => {
 
 export const calculateATR = (highs: number[], lows: number[], closes: number[], period: number = 14): number[] => {
   return ATR.calculate({ high: highs, low: lows, close: closes, period })
+}
+
+// Trend STRENGTH, not direction - a high ADX means a real trending move is
+// underway regardless of which way; low ADX means chop. Used as a regime
+// filter (2026-07-23, opt-in in the backtest) distinct from direction-based
+// checks like the daily-EMA trend modifier.
+export const calculateADX = (highs: number[], lows: number[], closes: number[], period: number = 14) => {
+  return ADX.calculate({ high: highs, low: lows, close: closes, period })
 }
 
 export const calculateEMA = (closes: number[], period: number): number => {
