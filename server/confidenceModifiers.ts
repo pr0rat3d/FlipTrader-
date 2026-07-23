@@ -27,6 +27,26 @@ const VIX_OPPOSED_MULTIPLIER = 0.90
 // risk-on/risk-off signal - avoids the modifier flipping on trivial chop.
 const VIX_NEUTRAL_THRESHOLD_PCT = 0.3
 
+// Multi-timeframe RSI confirmation (2026-07-23, opt-in via
+// --mtf-rsi-modifier in the backtest, not yet wired into any live cron).
+// Inspired by a TradingView multi-TF RSI study the user shared: a
+// convergence check across timeframes for ONE symbol, distinct from
+// TTF/DIV's existing cross-SYMBOL confluence on a single (5-min) timeframe.
+// Found live 2026-07-23: a cluster of bullish DIV alerts (0.96-0.98
+// confidence, boosted by the daily-trend modifier below since SPY/QQQ/IWM's
+// multi-month trend is bullish) fired into a real gap-down-and-continue
+// morning and all 10 real entries stopped out - the daily EMA50/200 trend
+// is too coarse a "does this actually apply right now" check for a same-day
+// reversal thesis. A higher (but still intraday) timeframe RSI is a nearer,
+// more relevant second opinion: if the 1hr RSI is ALSO oversold/overbought
+// in the signal's favor, that's real corroborating momentum; if it's still
+// firmly on the opposite side, the 5-min divergence is more likely noise
+// fighting an intact larger move - exactly today's failure mode.
+const MTF_RSI_ALIGNED_MULTIPLIER = 1.10
+const MTF_RSI_OPPOSED_MULTIPLIER = 0.90
+const MTF_RSI_OVERBOUGHT = 70
+const MTF_RSI_OVERSOLD = 30
+
 const MARKET_OPEN_MINUTES = 9 * 60 + 30
 const MARKET_CLOSE_MINUTES = 16 * 60
 const PRIME_TIME_WINDOW_MINUTES = 45
@@ -73,6 +93,11 @@ export interface ConfidenceModifierInputs {
   now?: Date
   chopZoneStartMinutes?: number
   chopZoneEndMinutes?: number
+  // Optional/experimental - undefined or null means "not computed," which
+  // no-ops exactly like the other optional inputs above. Only the backtest
+  // currently passes a real value (opt-in via --mtf-rsi-modifier); no live
+  // cron computes or passes this yet.
+  higherTimeframeRsi?: number | null
 }
 
 // Layers three modifiers onto an already-computed base confidence: does the
@@ -107,6 +132,18 @@ export const applyConfidenceModifiers = (baseConfidence: number, inputs: Confide
 
   if (isChopZone(now, inputs.chopZoneStartMinutes, inputs.chopZoneEndMinutes)) confidence *= CHOP_ZONE_MULTIPLIER
   else if (isPrimeTime(now)) confidence *= PRIME_TIME_MULTIPLIER
+
+  if (inputs.higherTimeframeRsi !== undefined && inputs.higherTimeframeRsi !== null) {
+    const rsi = inputs.higherTimeframeRsi
+    if (rsi <= MTF_RSI_OVERSOLD || rsi >= MTF_RSI_OVERBOUGHT) {
+      const higherTfBullish = rsi <= MTF_RSI_OVERSOLD
+      const aligned = (inputs.direction === 'bullish') === higherTfBullish
+      confidence *= aligned ? MTF_RSI_ALIGNED_MULTIPLIER : MTF_RSI_OPPOSED_MULTIPLIER
+    }
+    // Between 30-70: the higher timeframe isn't at an extreme either way -
+    // treated as no real opinion, same as the VIX modifier's neutral-move
+    // deadband above, rather than inventing a crossing-through-50 detector.
+  }
 
   return Math.min(MAX_CONFIDENCE, Math.max(MIN_CONFIDENCE, confidence))
 }

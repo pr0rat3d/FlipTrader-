@@ -51,7 +51,7 @@ import { Candle } from '../server/twelvedata.js'
 import { fetchIntradayHistory, fetchDailyHistory } from '../server/backtest/fetchHistory.js'
 import { dailyLevelsAsOf, openingRangeFor, supportResistanceLevelsAsOf, sessionVWAPFor } from '../server/backtest/replayHelpers.js'
 import { analyzeCandles } from '../server/indicators.js'
-import { calculateATR, calculateMACD } from '../src/lib/technicalIndicators.js'
+import { calculateATR, calculateMACD, calculateRSI } from '../src/lib/technicalIndicators.js'
 import { detectIVSignal } from '../server/signalDetection.js'
 import { detectCandlestickPattern } from '../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
@@ -74,6 +74,34 @@ const HISTOGRAM_DECELERATION_BARS = 3
 const ATR_STOP_MULTIPLIER = 1.5
 const ROLLING_WINDOW_BARS = 300 // matches live's getIntradayCandles(symbol, 300) default
 const VOL_WINDOW_BARS = 30 // trailing bars used for the realized-vol proxy at entry
+
+// Multi-timeframe RSI confirmation (2026-07-23, opt-in via --mtf-rsi-
+// modifier) - see confidenceModifiers.ts's header comment for why. Resamples
+// the SAME 5-min bars already being fetched (no extra data cost, live or
+// backtest) into synthetic ~1hr buckets, one close per 12 bars, rather than
+// fetching a real higher-timeframe series.
+const HTF_BAR_SIZE_BARS = 12
+const HTF_RSI_PERIOD = 14
+
+// RSI as of `uptoIndex` (inclusive) on a resampled higher timeframe - no
+// lookahead, only ever reads candles[0..uptoIndex]. The still-forming
+// current bucket's latest 5-min close is appended as its live reading
+// (mirrors TradingView's request.security repainting on the current bar
+// rather than waiting for it to close - the email's indicator does the
+// same). Returns null until there's enough resampled history for a real
+// RSI reading.
+const higherTimeframeRsiAt = (candles: Candle[], uptoIndex: number): number | null => {
+  const completedBuckets = Math.floor((uptoIndex + 1) / HTF_BAR_SIZE_BARS)
+  const htfCloses: number[] = []
+  for (let b = 0; b < completedBuckets; b++) {
+    htfCloses.push(candles[b * HTF_BAR_SIZE_BARS + HTF_BAR_SIZE_BARS - 1].close)
+  }
+  const remainder = (uptoIndex + 1) % HTF_BAR_SIZE_BARS
+  if (remainder > 0) htfCloses.push(candles[uptoIndex].close)
+  if (htfCloses.length <= HTF_RSI_PERIOD) return null
+  const rsiSeries = calculateRSI(htfCloses, HTF_RSI_PERIOD)
+  return rsiSeries.length > 0 ? rsiSeries[rsiSeries.length - 1] : null
+}
 
 // Entry-gate constants mirroring execute-alerts.ts's current live values
 // (2026-07-16) - kept here rather than imported, since execute-alerts.ts is
@@ -246,6 +274,8 @@ const parseArgs = () => {
   const quarterHourFilter = get('--quarter-hour-entry-filter-minutes') // e.g. "3" - hard filter, only allow entries within N minutes of a :00/:30 mark
   const tttfCutoff = get('--tttf-cutoff-minutes') // e.g. "60" - blocks new TTTF entries once this many minutes have passed since market open, everything else unchanged
   const lastCallMinConfidence = get('--last-call-min-confidence') // e.g. "0.90" - carve-out: entries past the 3:45pm force-close cutoff are normally always blocked, but one at/above this confidence is let through anyway. Naturally bounded to the ~15min before market close since there's no bar data past 4pm.
+  const divNoTrendModifierArg = args.includes('--div-no-trend-modifier') // Found live 2026-07-23: DIV is an anticipatory reversal thesis - the daily-trend-alignment bonus rewards it for agreeing with a lagging multi-month trend, which says nothing about whether THIS bar's dip actually reverses. Tests removing that bonus from DIV specifically, everything else (TTTF/DTTF/STTF/IV/ORB) unaffected.
+  const mtfRsiModifierArg = args.includes('--mtf-rsi-modifier') // 2026-07-23: adds the multi-timeframe RSI confirmation modifier (see confidenceModifiers.ts) to TTTF/DTTF/STTF/DIV - the RSI-divergence-based family - scoped off IV/ORB which don't key off RSI divergence at all.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -276,12 +306,14 @@ const parseArgs = () => {
     quarterHourEntryFilterMinutes: quarterHourFilter ? parseInt(quarterHourFilter, 10) : undefined,
     tttfCutoffMinutes: tttfCutoff ? parseInt(tttfCutoff, 10) : undefined,
     lastCallMinConfidence: lastCallMinConfidence ? parseFloat(lastCallMinConfidence) : undefined,
+    divNoTrendModifier: divNoTrendModifierArg,
+    mtfRsiModifier: mtfRsiModifierArg,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -292,6 +324,8 @@ const main = async () => {
   console.log(`Quarter-hour (:00/:30) hard entry filter: ${quarterHourEntryFilterMinutes !== undefined ? `within ${quarterHourEntryFilterMinutes}min` : 'off'}`)
   console.log(`TTTF late-session cutoff: ${tttfCutoffMinutes !== undefined ? `blocks new TTTF entries after ${tttfCutoffMinutes}min since open` : 'off'}`)
   console.log(`Last-call past-force-close carve-out: ${lastCallMinConfidence !== undefined ? `lets entries >= ${lastCallMinConfidence} confidence through after 3:45pm` : 'off (live default: hard block)'}`)
+  console.log(`DIV daily-trend-alignment modifier: ${divNoTrendModifier ? 'OFF (removed for DIV only)' : 'on (live default)'}`)
+  console.log(`Multi-timeframe RSI confirmation modifier: ${mtfRsiModifier ? 'ON (TTTF/DTTF/STTF/DIV)' : 'off (live default)'}`)
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
@@ -725,6 +759,10 @@ const main = async () => {
         vixChangePct: null,
         now,
         chopZoneStartMinutes, chopZoneEndMinutes
+        // Found testing 2026-07-23: --mtf-rsi-modifier applied here too
+        // (TTTF/DTTF/STTF) helped DIV but meaningfully HURT DTTF (-$1,493
+        // over the same window) - scoped to DIV only below instead. See
+        // that call site's comment for the isolated DIV-only result.
       })
 
       for (const r of signalResults) {
@@ -748,15 +786,27 @@ const main = async () => {
         const openingRange = openingRangeFor(representative.sessionCandlesSoFar)
         const orbDirection = detectORBBreakout(representative.sessionCandlesSoFar, openingRange?.orh ?? null, openingRange?.orl ?? null)
         const baseConfidence = divergent.length === 3 ? 0.80 : divergent.length === 2 ? 0.65 : 0.50
+        // Found live 2026-07-23: a cluster of bullish DIV alerts (0.96-0.98
+        // confidence) fired straight into a gap-down-and-continue morning -
+        // all 10 real entries taken that day stopped out. The daily
+        // trend (SPY/QQQ/IWM all in a standing multi-month bullish EMA50>
+        // EMA200 trend) agreed with DIV's bullish reversal call and got a
+        // 1.15x bonus, even though DIV's whole thesis is an ANTICIPATED
+        // short-horizon reversal - a signal type that's often, by
+        // construction, fighting the immediate move right up until it
+        // isn't. The daily trend says nothing about whether THIS bar's dip
+        // actually reverses. Opt-in via --div-no-trend-modifier, DIV only -
+        // TTTF/DTTF/STTF/IV/ORB unaffected.
         const confidence = applyConfidenceModifiers(baseConfidence, {
           direction,
-          dailyEma50: dailyLevels?.dailyEma50 ?? null,
-          dailyEma200: dailyLevels?.dailyEma200 ?? null,
+          dailyEma50: divNoTrendModifier ? null : (dailyLevels?.dailyEma50 ?? null),
+          dailyEma200: divNoTrendModifier ? null : (dailyLevels?.dailyEma200 ?? null),
           candlestickDirection: patternMatch?.direction ?? null,
           orbBreakoutDirection: orbDirection,
           vixChangePct: null,
           now,
-          chopZoneStartMinutes, chopZoneEndMinutes
+          chopZoneStartMinutes, chopZoneEndMinutes,
+          higherTimeframeRsi: mtfRsiModifier ? higherTimeframeRsiAt(intradayCandles[representative.symbol], representative.globalIndex) : undefined
         })
 
         for (const s of divergent) {
@@ -915,7 +965,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
