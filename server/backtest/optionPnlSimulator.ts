@@ -6,6 +6,7 @@ import {
   FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, HARD_STOP_PCT_DEFAULT, BREAKEVEN_PROTECTION_STOP_PCT
 } from '../execution/optionPositionSizing.js'
 import { nyMinutesSinceMidnight } from '../rvol.js'
+import { nyDateKey } from '../marketHours.js'
 
 // Incremental, bar-by-bar position model - mirrors monitor-executions.ts's
 // actual per-poll structure (not a pre-resolve-the-whole-future function
@@ -127,7 +128,19 @@ export const checkPositionAtBar = (position: SimPosition, underlyingClose: numbe
   if (position.status !== 'open') return false
 
   const minutesNow = nyMinutesSinceMidnight(new Date(timeIso))
+  // Found 2026-07-22 testing a --last-call-min-confidence carve-out: a
+  // position opened on the literal last bar of the session has no
+  // subsequent SAME-DAY bar to ever see minutesNow cross the cutoff - the
+  // walk-forward loop just moves on to the next calendar day's first bar,
+  // where minutesNow resets low and this check silently stays false. That
+  // let a 0DTE contract "survive" into the next day's price action and get
+  // modeled-priced against it, producing an impossible $2,238 single-trade
+  // gain that dominated the carve-out's apparent backtest edge. Checking
+  // the calendar day explicitly (not just minutes-since-midnight) closes
+  // this regardless of why a position might still be open past its own
+  // entry day.
   const pastForceClose = minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET
+    || nyDateKey(timeIso) !== nyDateKey(position.entryTimeIso)
   const pastTimeLock = minutesNow >= RUNNER_TIME_LOCK_HOUR_ET * 60 + RUNNER_TIME_LOCK_MINUTE_ET
   const premium = modeledPremiumAt(position, underlyingClose, timeIso)
 

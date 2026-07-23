@@ -244,6 +244,8 @@ const parseArgs = () => {
   const rebalanceCapitalPriorityArg = args.includes('--rebalance-capital-priority') // halves ORB/IV position size (RISK_PCT_MULTIPLIER_BY_TYPE), DIV/TTTF/DTTF/STTF unaffected
   const disableTypesArg = get('--disable-types') // e.g. "ORB,IV" - removes these signal types from the rotation entirely
   const quarterHourFilter = get('--quarter-hour-entry-filter-minutes') // e.g. "3" - hard filter, only allow entries within N minutes of a :00/:30 mark
+  const tttfCutoff = get('--tttf-cutoff-minutes') // e.g. "60" - blocks new TTTF entries once this many minutes have passed since market open, everything else unchanged
+  const lastCallMinConfidence = get('--last-call-min-confidence') // e.g. "0.90" - carve-out: entries past the 3:45pm force-close cutoff are normally always blocked, but one at/above this confidence is let through anyway. Naturally bounded to the ~15min before market close since there's no bar data past 4pm.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -272,12 +274,14 @@ const parseArgs = () => {
     disabledTypes: disableTypesArg ? new Set(disableTypesArg.split(',').map(s => s.trim())) : undefined,
     disabledTypesLabel: disableTypesArg ?? 'none',
     quarterHourEntryFilterMinutes: quarterHourFilter ? parseInt(quarterHourFilter, 10) : undefined,
+    tttfCutoffMinutes: tttfCutoff ? parseInt(tttfCutoff, 10) : undefined,
+    lastCallMinConfidence: lastCallMinConfidence ? parseFloat(lastCallMinConfidence) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -286,6 +290,8 @@ const main = async () => {
   console.log(`Quiet-open window (blocks new IV/ORB entries before this time): ${quietOpenUntilLabel}`)
   console.log(`Quarter-hour (:00/:30) confidence discount: ${quarterHourConfidenceDiscount !== undefined ? quarterHourConfidenceDiscount : 'off'}`)
   console.log(`Quarter-hour (:00/:30) hard entry filter: ${quarterHourEntryFilterMinutes !== undefined ? `within ${quarterHourEntryFilterMinutes}min` : 'off'}`)
+  console.log(`TTTF late-session cutoff: ${tttfCutoffMinutes !== undefined ? `blocks new TTTF entries after ${tttfCutoffMinutes}min since open` : 'off'}`)
+  console.log(`Last-call past-force-close carve-out: ${lastCallMinConfidence !== undefined ? `lets entries >= ${lastCallMinConfidence} confidence through after 3:45pm` : 'off (live default: hard block)'}`)
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
@@ -440,7 +446,17 @@ const main = async () => {
     const minutesNow = nyMinutesSinceMidnight(entryTime)
     const dayKey = nyDateKey(t)
 
-    if (minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) return skip('past_force_close')
+    // Found live 2026-07-22: a 0.98-confidence DTTF signal fired at 3:54pm
+    // ET, 9 minutes after the 3:45pm force-close cutoff, and got correctly
+    // blocked - the live gate makes no exception for confidence, ever. Worth
+    // testing whether a narrow, high-confidence-only carve-out recovers real
+    // edge here or whether the cutoff's conservatism (0DTE expiration risk
+    // in the final minutes) is earning its keep. Opt-in via
+    // --last-call-min-confidence - naturally bounded to the ~15min before
+    // 4pm close since there's no bar data after that anyway.
+    if (minutesNow >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) {
+      if (lastCallMinConfidence === undefined || confidence < lastCallMinConfidence) return skip('past_force_close')
+    }
     // Harder version of the capital-priority rebalance: instead of halving
     // ORB/IV's position size (found 2026-07-17 that the shared-capital-pool
     // just reabsorbed the freed buying power as MORE ORB/IV entries,
@@ -466,6 +482,19 @@ const main = async () => {
     // (the two types that showed this pattern) - everything else unchanged.
     if (quietOpenUntilMinutes !== undefined && (ttfStatus === 'IV' || ttfStatus === 'ORB') && minutesNow < quietOpenUntilMinutes) {
       return skip('quiet_open_window')
+    }
+    // Found live 2026-07-20/21: segmenting the current live mix (DIV/TTTF/
+    // DTTF) by time-since-open showed the first 60 minutes clearly
+    // outperforming the rest of the day (56.9% win rate, ~$0 avg after
+    // 60min vs 75-85% win rate, $68-124 avg before it) - opposite direction
+    // from IV/ORB's need for a quiet-open lag. TTTF specifically carries
+    // almost its entire net loss in the 60min+ bucket (-$2,184 across 50
+    // entries, 48% win rate) versus a small but clean positive sample in
+    // the first 15 minutes. Opt-in via --tttf-cutoff-minutes, scoped to
+    // TTTF only - DIV/DTTF stayed net positive even late in the day, so no
+    // reason to cut them off too.
+    if (tttfCutoffMinutes !== undefined && ttfStatus === 'TTTF' && (minutesNow - MARKET_OPEN_MINUTES_ET) >= tttfCutoffMinutes) {
+      return skip('tttf_late_session_cutoff')
     }
     // Harder version of the same idea: instead of a confidence discount,
     // require entries to fire within N minutes of a :00/:30 mark at all -
@@ -558,6 +587,22 @@ const main = async () => {
   }
 
   let barsEvaluated = 0
+  // Found 2026-07-22 testing a --last-call-min-confidence carve-out:
+  // checkPositionAtBar only ever runs on a bar AFTER a position's own
+  // entry bar (see step 1b below), and only sees a force-close if minutesNow
+  // crosses the cutoff on some SAME-DAY bar. A position opened on the
+  // literal last bar of the session has no such bar left to run on - the
+  // walk-forward loop just moves on to tomorrow's first bar, where the new
+  // day's low minutesNow makes the position look freshly within-hours
+  // again. That silently carried a "0DTE" contract into the next day's
+  // price action and modeled its premium against it, producing an
+  // impossible $2,238 single-trade windfall that would have dominated the
+  // carve-out's apparent backtest edge. Tracked here so any day-boundary
+  // crossing can sweep-close survivors against the PREVIOUS day's own last
+  // known price/time, not the new day's.
+  let currentDayKey: string | null = null
+  const lastCloseBySymbol: Partial<Record<Symbol, number>> = {}
+  let lastBarTimeIso: string | undefined
 
   for (const clockBar of clockBars) {
     const t = clockBar.datetime
@@ -565,6 +610,17 @@ const main = async () => {
     barsEvaluated++
 
     const todayKey = nyDateKey(t)
+    if (currentDayKey !== null && todayKey !== currentDayKey && lastBarTimeIso !== undefined) {
+      for (const position of [...openPositions]) {
+        const lastPrice = lastCloseBySymbol[position.symbol as Symbol]
+        if (lastPrice === undefined) continue
+        const prevFillCount = position.fills.length
+        const closed = checkPositionAtBar(position, lastPrice, lastBarTimeIso)
+        applyFillEffects(position, prevFillCount)
+        if (closed) removeClosedPosition(position, lastBarTimeIso)
+      }
+    }
+    currentDayKey = todayKey
     if (!startOfDayEquityByDay.has(todayKey)) startOfDayEquityByDay.set(todayKey, simEquity)
 
     // --- 1a. Update every currently-open leg (Phase 1) against this bar's close ---
@@ -784,6 +840,12 @@ const main = async () => {
         }
       }
     }
+
+    for (const symbol of SYMBOLS) {
+      const gi = indexByTime[symbol].get(t)
+      if (gi !== undefined) lastCloseBySymbol[symbol] = intradayCandles[symbol][gi].close
+    }
+    lastBarTimeIso = t
   }
 
   // Anything still open at the end of the backtest window is unresolved -
@@ -853,7 +915,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
