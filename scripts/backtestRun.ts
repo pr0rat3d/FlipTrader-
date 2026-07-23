@@ -103,6 +103,53 @@ const higherTimeframeRsiAt = (candles: Candle[], uptoIndex: number): number | nu
   return rsiSeries.length > 0 ? rsiSeries[rsiSeries.length - 1] : null
 }
 
+// ADXC prototype (2026-07-24, opt-in via --adxc-min-adx) - "puts and chill"
+// idea from the 07-23 incident: instead of just gating DIV's reversal calls
+// off on a trend day, actually trade the trend itself. NOT wired into
+// server/indicators.ts or any live cron - this is backtest-only until/unless
+// it shows a real edge, same discipline ORB was held to (a continuation idea
+// that "felt obviously right" after one dramatic day was tested twice and
+// rejected both times - see project memory - so this needs the same real
+// backtest scrutiny, not a pass just because today made it feel intuitive).
+//
+// Two loosening attempts were tried and REVERTED - both made results worse,
+// not better, and each progressively so:
+//   1. Histogram same-side + ADX-non-declining (instead of strict 3-bar
+//      growth): entries went 2-19 -> 10-26, P&L went from +$285/+$665 down
+//      to a range spanning -$334 to +$344 - bigger sample, but net effect
+//      roughly breakeven, no longer a clear edge.
+//   2. Fresh-extreme proximity tolerance (0.2%, then a 4-bar recency check
+//      instead of the exact-tick requirement): entries flooded to 74-98,
+//      P&L went sharply negative (-$2,716 to -$4,142), wiping the
+//      simulated account near $0 and choking DTTF/DIV via the shared
+//      capital pool (a new insufficient_buying_power skip reason appeared).
+// Reverted back to the original strict version below - the escalating
+// damage from each loosening is itself evidence the strict conditions were
+// doing real, necessary filtering work, not just adding friction. Rare-and-
+// clean beats frequent-and-bad. Still only a handful of entries per 90 days
+// (n=2-19) - promising, not validated; needs more live/backtest data before
+// this is remotely ready to consider shipping.
+const HISTOGRAM_EXPANSION_BARS = 3
+const detectHistogramExpansion = (macdData: { histogram?: number }[], bars: number): 'bullish' | 'bearish' | null => {
+  if (macdData.length < bars) return null
+  const recent = macdData.slice(-bars).map(m => m.histogram)
+  if (recent.some(h => h === undefined)) return null
+  const values = recent as number[]
+  if (values.every(v => v > 0) && values.every((v, i) => i === 0 || v > values[i - 1])) return 'bullish'
+  if (values.every(v => v < 0) && values.every((v, i) => i === 0 || v < values[i - 1])) return 'bearish'
+  return null
+}
+
+// Fresh session extreme, same direction as the move - confirms this is an
+// ACTIVE continuation (price still pushing to new ground), not a stalled
+// trend that ADX just hasn't caught up to yet.
+const isFreshSessionExtreme = (direction: 'bullish' | 'bearish', price: number, sessionCandles: Candle[]): boolean => {
+  if (sessionCandles.length === 0) return false
+  return direction === 'bullish'
+    ? price >= Math.max(...sessionCandles.map(c => c.high))
+    : price <= Math.min(...sessionCandles.map(c => c.low))
+}
+
 // Entry-gate constants mirroring execute-alerts.ts's current live values
 // (2026-07-16) - kept here rather than imported, since execute-alerts.ts is
 // a Vercel API handler, not a library module meant to be imported from a
@@ -184,6 +231,15 @@ interface PerSymbolBar {
   target50EMA: number
   atr: number | null
   adx: number | null
+  // ADX's own directional components (+DI vs -DI) - which side of the trend
+  // is actually dominant, distinct from adx (which is strength only,
+  // direction-agnostic). Prototype-only (2026-07-24, --adxc-min-adx).
+  adxDirection: 'bullish' | 'bearish' | null
+  // Mirror image of histogramDeceleration - the histogram magnitude GROWING
+  // over the last few bars in one direction (strengthening momentum) rather
+  // than shrinking toward zero (DIV's anticipated-reversal thesis).
+  // Prototype-only (2026-07-24, --adxc-min-adx).
+  histogramExpansion: 'bullish' | 'bearish' | null
   sessionCandlesSoFar: Candle[]
   globalIndex: number
 }
@@ -278,6 +334,7 @@ const parseArgs = () => {
   const divNoTrendModifierArg = args.includes('--div-no-trend-modifier') // Found live 2026-07-23: DIV is an anticipatory reversal thesis - the daily-trend-alignment bonus rewards it for agreeing with a lagging multi-month trend, which says nothing about whether THIS bar's dip actually reverses. Tests removing that bonus from DIV specifically, everything else (TTTF/DTTF/STTF/IV/ORB) unaffected.
   const mtfRsiModifierArg = args.includes('--mtf-rsi-modifier') // 2026-07-23: adds the multi-timeframe RSI confirmation modifier (see confidenceModifiers.ts) to TTTF/DTTF/STTF/DIV - the RSI-divergence-based family - scoped off IV/ORB which don't key off RSI divergence at all.
   const divAdxTrendGate = get('--div-adx-trend-gate') // e.g. "25" - blocks new DIV entries when the representative symbol's own 14-period ADX is at/above this level (a real trend day underway), DIV only - everything else unaffected.
+  const adxcMinAdx = get('--adxc-min-adx') // e.g. "25" - enables the ADXC prototype signal (a new type, entirely separate from DIV/TTF/ORB) and sets its ADX floor. Undefined = signal doesn't exist for this run at all.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -311,12 +368,13 @@ const parseArgs = () => {
     divNoTrendModifier: divNoTrendModifierArg,
     mtfRsiModifier: mtfRsiModifierArg,
     divAdxTrendGate: divAdxTrendGate ? parseFloat(divAdxTrendGate) : undefined,
+    adxcMinAdx: adxcMinAdx ? parseFloat(adxcMinAdx) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -330,6 +388,7 @@ const main = async () => {
   console.log(`DIV daily-trend-alignment modifier: ${divNoTrendModifier ? 'OFF (removed for DIV only)' : 'on (live default)'}`)
   console.log(`Multi-timeframe RSI confirmation modifier: ${mtfRsiModifier ? 'ON (TTTF/DTTF/STTF/DIV)' : 'off (live default)'}`)
   console.log(`DIV ADX trend-day gate: ${divAdxTrendGate !== undefined ? `blocks new DIV entries when ADX >= ${divAdxTrendGate}` : 'off (live default)'}`)
+  console.log(`ADXC prototype (trend continuation): ${adxcMinAdx !== undefined ? `ON, ADX >= ${adxcMinAdx}` : 'off (does not exist unless enabled)'}`)
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
@@ -729,6 +788,7 @@ const main = async () => {
       // ADX means "real trend underway," a different axis than the
       // direction-based daily-EMA/MTF-RSI checks.
       const adxValues = calculateADX(window.map(c => c.high), window.map(c => c.low), closes, 14)
+      const latestAdx = adxValues[adxValues.length - 1]
       const dayKey = nyDateKey(t)
       const dayStart = dayStartIndex[symbol].get(dayKey) ?? gi
       const sessionCandlesSoFar = intradayCandles[symbol].slice(dayStart, gi + 1)
@@ -741,7 +801,9 @@ const main = async () => {
         entryPrice: signal.entryPrice,
         target50EMA: signal.target50EMA,
         atr: atrValues[atrValues.length - 1] ?? null,
-        adx: adxValues[adxValues.length - 1]?.adx ?? null,
+        adx: latestAdx?.adx ?? null,
+        adxDirection: latestAdx ? (latestAdx.pdi > latestAdx.mdi ? 'bullish' : 'bearish') : null,
+        histogramExpansion: detectHistogramExpansion(macdData, HISTOGRAM_EXPANSION_BARS),
         sessionCandlesSoFar,
         globalIndex: gi
       })
@@ -912,6 +974,51 @@ const main = async () => {
       }
     }
 
+    // --- 7. ADXC (ADX-confirmed trend continuation, prototype 2026-07-24) ---
+    // Doesn't exist at all unless --adxc-min-adx is passed. Requires, per
+    // symbol: ADX strength >= threshold, the +DI/-DI split agreeing with
+    // direction, a fresh session extreme in that direction (an ACTIVE
+    // continuation, not a stalled trend), and an expanding MACD histogram
+    // (the mirror image of DIV's decelerating one). Two looser variants of
+    // the histogram/extreme checks were tried and reverted - see the
+    // detector functions' header comment for why. Reuses ORB's index-count
+    // confidence tiering and continuationTargetPrice/stopLossFor - same
+    // "continuation, not reversal" trade shape as ORB, just gated on trend
+    // STRENGTH (ADX) instead of an opening-range breakout.
+    if (adxcMinAdx !== undefined && !fullConfluenceFired) {
+      for (const direction of ['bullish', 'bearish'] as const) {
+        const qualifying = perSymbolSignals.filter(s =>
+          s.adx !== null && s.adx >= adxcMinAdx &&
+          s.adxDirection === direction &&
+          s.histogramExpansion === direction &&
+          isFreshSessionExtreme(direction, s.entryPrice, s.sessionCandlesSoFar)
+        )
+        if (qualifying.length < 1) continue
+
+        const representative = qualifying.find(s => s.symbol === 'SPY') || qualifying[0]
+        const patternMatch = detectCandlestickPattern(representative.sessionCandlesSoFar)
+        const confidence = applyConfidenceModifiers(orbBaseConfidence(qualifying.length), {
+          direction,
+          dailyEma50: null,
+          dailyEma200: null,
+          candlestickDirection: patternMatch?.direction ?? null,
+          orbBreakoutDirection: null,
+          vixChangePct: null,
+          now,
+          chopZoneStartMinutes, chopZoneEndMinutes
+        })
+
+        for (const s of qualifying) {
+          const legStop = stopLossFor(direction, s.entryPrice, s.atr)
+          const legTarget = continuationTargetPrice(direction, s.entryPrice, legStop)
+          const leg = makeLeg('ADXC', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr)
+          legs.push(leg)
+          openLegsBySymbol[s.symbol].push(leg)
+          attemptGatedEntry('ADXC', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.globalIndex)
+        }
+      }
+    }
+
     for (const symbol of SYMBOLS) {
       const gi = indexByTime[symbol].get(t)
       if (gi !== undefined) lastCloseBySymbol[symbol] = intradayCandles[symbol][gi].close
@@ -986,7 +1093,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
