@@ -256,6 +256,47 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       })
     }
 
+    // Daily-loss circuit breaker, shipped 2026-07-24 (backtest-wired since
+    // 07-18, never live until now - the intentional, recoverable version of
+    // the accidental equity-band lockout fixed 07-17). Pauses new entries
+    // for the rest of the day once realized loss hits daily_loss_limit_pct
+    // of the day's starting equity - existing open positions are still
+    // managed normally by monitor-executions.ts, only new entries stop.
+    // Alpaca's account.last_equity came back 0 when checked empirically for
+    // this account (unusable - would silently disable this forever), so
+    // the starting-equity snapshot is tracked in our own table instead,
+    // written once by whichever run is first to see a given trading_date.
+    if (settingsRow.daily_loss_limit_pct !== null) {
+      const account = await getAccount()
+      if (account) {
+        const { data: existingSnapshot } = await supabase
+          .from('daily_equity_snapshots')
+          .select('starting_equity')
+          .eq('trading_date', today)
+          .maybeSingle()
+
+        let startingEquity = existingSnapshot?.starting_equity
+        if (startingEquity === undefined) {
+          const { data: inserted } = await supabase
+            .from('daily_equity_snapshots')
+            .insert({ trading_date: today, starting_equity: account.equity })
+            .select()
+            .maybeSingle()
+          // A concurrent run may have already inserted today's row (unique
+          // PK conflict) - falling back to current equity for just this one
+          // run is harmless, since the next run will find the real snapshot.
+          startingEquity = inserted?.starting_equity ?? account.equity
+        }
+
+        if (account.equity <= startingEquity * (1 - settingsRow.daily_loss_limit_pct)) {
+          return res.status(200).json({
+            success: true, skipped: true,
+            reason: `daily loss limit hit (equity $${account.equity.toFixed(2)} vs start-of-day $${startingEquity.toFixed(2)}, limit ${(settingsRow.daily_loss_limit_pct * 100).toFixed(0)}%)`
+          })
+        }
+      }
+    }
+
     const sizeSettings: ContractSizeSettings = {
       minAccountEquity: settingsRow.min_account_equity,
       maxAccountEquity: settingsRow.max_account_equity
