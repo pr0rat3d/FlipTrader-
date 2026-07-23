@@ -85,6 +85,25 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
 // case this ever gets reverted, their calibration is still there).
 const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF'])
 
+// DIV trend-day gate, shipped 2026-07-23 after a real incident: 10 straight
+// bullish DIV entries fired into a genuine gap-down-and-continue morning
+// (SPY ADX 48.7-50.6, -DI dominating +DI at the time) and all 10 stopped
+// out - DIV's reversal thesis (histogram deceleration -> expect a bounce)
+// reads identically whether it's a real turn or a shallow pause inside a
+// strong trend already underway. ADX measures trend STRENGTH regardless of
+// direction, a different axis from the daily-EMA trend-direction check
+// already feeding the confidence modifier. Backtested (server/backtest/,
+// scripts/backtestRun.ts's --div-adx-trend-gate) across thresholds 20-40:
+// every threshold improves DIV's own win rate substantially (70.8% ->
+// 75-89%) at the cost of volume; 30 lands near breakeven-to-positive on
+// total P&L across the 90-day window ($3,219 -> $3,201, plus a positive
+// shared-capital-pool cascade onto DTTF in most runs) while directly and
+// unambiguously catching the 07-23 incident (its real ADX reading of
+// 48.7-50.6 clears this threshold by a wide margin). DIV only - computed
+// and stored on the alert itself by scan-confluence.ts, not recomputed
+// here.
+const DIV_ADX_TREND_GATE = 30
+
 // A profit_targets leg stays status='open' (and so eligible here) for as
 // long as the underlying hasn't technically touched its own ATR-based
 // stop_loss_price - a much wider band than how fast an option premium
@@ -180,6 +199,7 @@ interface OpenLeg {
     ttf_status: string
     confluence_level: number | null
     indices_triggered: string[]
+    adx: number | null
   } | null
 }
 
@@ -243,7 +263,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const { data: legs, error: legsError } = await supabase
       .from('profit_targets')
-      .select('id, symbol, entry_price, entry_time, target_50ema_price, day_trade_alerts(macd_curl, confidence, ttf_status, confluence_level, indices_triggered)')
+      .select('id, symbol, entry_price, entry_time, target_50ema_price, day_trade_alerts(macd_curl, confidence, ttf_status, confluence_level, indices_triggered, adx)')
       .eq('status', 'open')
 
     if (legsError) throw legsError
@@ -296,6 +316,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ? MIN_CONFIDENCE_BY_TYPE[ttfStatusForConfidence]
         : settingsRow.min_confidence
       if (confidence < minConfidence) continue
+
+      if (ttfStatusForConfidence === 'DIV') {
+        const adx = leg.day_trade_alerts?.adx
+        if (adx !== null && adx !== undefined && adx >= DIV_ADX_TREND_GATE) continue
+      }
 
       // IV only - ORB's own 15-min opening-range window is already a
       // sufficient "wait," see optionPositionSizing.ts.

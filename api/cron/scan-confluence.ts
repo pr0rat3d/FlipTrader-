@@ -8,7 +8,7 @@ import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { recordSnapshot } from '../../server/snapshot.js'
 import { calculateSessionVWAP } from '../../server/vwap.js'
-import { calculateATR } from '../../src/lib/technicalIndicators.js'
+import { calculateATR, calculateADX } from '../../src/lib/technicalIndicators.js'
 import { deriveMilestonePrices } from '../../server/alertOutcomes.js'
 import { getSupportResistanceLevels, getDailyLevels, calculateOpeningRange } from '../../server/supportResistance.js'
 import { detectIVSignal } from '../../server/signalDetection.js'
@@ -91,6 +91,9 @@ interface PerSymbolSignal {
   entryPrice: number
   target50EMA: number
   atr: number | null
+  // Trend STRENGTH (not direction) - see execute-alerts.ts's
+  // DIV_ADX_TREND_GATE for why this is computed here (2026-07-23).
+  adx: number | null
   candles: Candle[]
 }
 
@@ -146,6 +149,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       if (signal) {
         const atrValues = calculateATR(candles.map(c => c.high), candles.map(c => c.low), closes, 14)
+        const adxValues = calculateADX(candles.map(c => c.high), candles.map(c => c.low), closes, 14)
         perSymbolSignals.push({
           symbol,
           rsiDivergence: signal.rsiDivergence,
@@ -154,6 +158,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           entryPrice: signal.entryPrice,
           target50EMA: signal.target50EMA,
           atr: atrValues[atrValues.length - 1] ?? null,
+          adx: adxValues[adxValues.length - 1]?.adx ?? null,
           candles
         })
       }
@@ -305,6 +310,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             confidence,
             stop_loss_price: stopLossFor(direction, representative.entryPrice, representative.atr),
             orb_breakout_direction: orbDirection,
+            adx: representative.adx,
             timestamp: entryTime
           })
           .select()
