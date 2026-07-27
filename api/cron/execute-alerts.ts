@@ -7,7 +7,7 @@ import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import {
   computeContractCount, tierPlanFor, ContractSizeSettings,
-  FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES,
+  NEW_ENTRY_CUTOFF_HOUR_ET, NEW_ENTRY_CUTOFF_MINUTE_ET, MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES,
   RISK_PCT_MULTIPLIER_BY_TYPE, DEFAULT_RISK_PCT_MULTIPLIER
 } from '../../server/execution/optionPositionSizing.js'
 import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
@@ -222,12 +222,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ success: true, skipped: true, reason: 'market closed' })
     }
 
-    // A brand-new 0DTE position opened after the force-close cutoff would get
-    // immediately flattened by monitor-executions.ts on its very next poll -
-    // a pointless round-trip that only pays the bid-ask spread for zero
-    // chance to develop. No new entries once we're past that point.
-    if (nyMinutesSinceMidnight(new Date()) >= FORCE_CLOSE_HOUR_ET * 60 + FORCE_CLOSE_MINUTE_ET) {
-      return res.status(200).json({ success: true, skipped: true, reason: 'past force-close cutoff, no new entries' })
+    // A brand-new 0DTE position opened this late has nowhere to go: Alpaca
+    // itself starts rejecting new 0DTE option orders with a 422 ("contract
+    // expires soon") before the app's own 3:45pm force-close cutoff even
+    // arrives - see NEW_ENTRY_CUTOFF_HOUR_ET/MINUTE_ET's own comment for the
+    // real order-attempt data this boundary is bracketed from. Stopping here
+    // avoids burning a doomed API call on an order that was never going to
+    // be accepted (confirmed this doesn't consume a max_daily_entries slot
+    // either way - that only increments on a successful placeOrder - but
+    // there's no reason to make the attempt at all).
+    if (nyMinutesSinceMidnight(new Date()) >= NEW_ENTRY_CUTOFF_HOUR_ET * 60 + NEW_ENTRY_CUTOFF_MINUTE_ET) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'past new-entry cutoff (Alpaca rejects new 0DTE positions this close to expiration)' })
     }
 
     // Hard cap on total entries per NY trading day - not contract count, not

@@ -63,6 +63,24 @@ export const RUNNER_TIME_LOCK_MIN_PCT = 0.50
 export const FORCE_CLOSE_HOUR_ET = 15
 export const FORCE_CLOSE_MINUTE_ET = 45
 
+// Alpaca rejects opening a NEW 0DTE option position with a 422
+// ("contract ... expires soon, unable to open new positions") starting
+// somewhere before this app's own 3:45pm force-close cutoff - a broker-side
+// risk control this code didn't previously know about. Found 2026-07-27
+// bracketed from real order attempts across three separate sessions: the
+// latest entry that's EVER succeeded was 19:16 UTC (3:16pm ET, 2026-07-24);
+// the earliest confirmed "expires soon" rejection was 19:32 UTC (3:32pm ET,
+// same day); a second session (2026-07-17) also failed starting 19:37 UTC,
+// though pre-dating the describeAlpacaError fix so its rejection reason
+// wasn't captured - almost certainly the same wall, just unreadable at the
+// time. 15:30 sits in the untested gap between the last known success and
+// the earliest known failures, closer to the failure side for margin -
+// tighten or loosen if more data narrows the real boundary. Applies ONLY to
+// opening new positions (execute-alerts.ts) - existing open positions still
+// force-close at the later FORCE_CLOSE_HOUR_ET/MINUTE_ET above, unaffected.
+export const NEW_ENTRY_CUTOFF_HOUR_ET = 15
+export const NEW_ENTRY_CUTOFF_MINUTE_ET = 30
+
 const MIN_CONTRACTS = 2
 const MAX_CONTRACTS = 5
 
