@@ -108,27 +108,60 @@ const cancelUnfilledTierOrders = async (tiers: Tier[]) => {
 // used only when that tier's own resting order failed to place at entry, or
 // landed in a terminal bad state (canceled/expired/rejected) unexpectedly.
 // Not the primary mechanism anymore (see the tier-fill loop in runOnce).
+//
+// 2026-07-29 fix: confirmed empirically that this is now effectively the
+// ONLY mechanism that can ever fire, for every position. A resting
+// broker-side stop for the position's full remaining quantity (placed at
+// entry) permanently reserves that entire quantity - any additional sell
+// order (a tier's own resting limit at entry, OR this fallback's market
+// sell) gets rejected with "account not eligible to trade uncovered option
+// contracts", confirmed by hitting the live API directly against a real
+// stuck position. Also confirmed live that Alpaca's option orders don't
+// support order_class 'oco'/bracket ("complex orders not supported for
+// options trading"), which would have solved this more cleanly - not
+// available on this account. So: cancel the resting stop first to free the
+// quantity, THEN attempt the sell. If the sell still fails for some other
+// reason, restore the SAME stop (same qty/price) immediately rather than
+// leave the position naked - the caller persists the restored order id.
 const attemptFallbackTierSell = async (
-  optionSymbol: string, tier: Tier, bid: number, remaining: number, currentPct: number, pastTimeLock: boolean, symbolForNotify: string, tierClientOrderId: string
-): Promise<{ filled: boolean; fillPrice: number; orderId: string | null; closeStatus: string | null }> => {
-  if (tier.is_runner) {
-    const hitTarget = currentPct >= tier.target_pct
-    const timeLockEligible = pastTimeLock && currentPct >= RUNNER_TIME_LOCK_MIN_PCT
-    if (!hitTarget && !timeLockEligible) return { filled: false, fillPrice: 0, orderId: null, closeStatus: null }
-    const result = await sellAtMarket(optionSymbol, remaining, tierClientOrderId)
-    if (!result.orderId) {
-      await notifyManualReview(symbolForNotify, `Runner fallback sell failed - ${result.failure}`)
-      return { filled: false, fillPrice: 0, orderId: null, closeStatus: null }
-    }
-    return { filled: true, fillPrice: bid, orderId: result.orderId, closeStatus: hitTarget ? 'closed_target' : 'closed_time_lock' }
-  }
-  if (currentPct < tier.target_pct) return { filled: false, fillPrice: 0, orderId: null, closeStatus: null }
-  const result = await sellAtMarket(optionSymbol, 1, tierClientOrderId)
+  optionSymbol: string, tier: Tier, bid: number, remaining: number, currentPct: number, pastTimeLock: boolean,
+  symbolForNotify: string, tierClientOrderId: string,
+  stopOrderId: string | null, stopPrice: number, restoreClientOrderId: string
+): Promise<{ filled: boolean; fillPrice: number; orderId: string | null; closeStatus: string | null; stopOrderIdAfterAttempt: string | null }> => {
+  const hitTarget = currentPct >= tier.target_pct
+  const timeLockEligible = tier.is_runner && pastTimeLock && currentPct >= RUNNER_TIME_LOCK_MIN_PCT
+  const conditionMet = tier.is_runner ? (hitTarget || timeLockEligible) : hitTarget
+  if (!conditionMet) return { filled: false, fillPrice: 0, orderId: null, closeStatus: null, stopOrderIdAfterAttempt: stopOrderId }
+
+  if (stopOrderId) await cancelOrder(stopOrderId)
+
+  const qtyToSell = tier.is_runner ? remaining : 1
+  const result = await sellAtMarket(optionSymbol, qtyToSell, tierClientOrderId)
+
   if (!result.orderId) {
-    await notifyManualReview(symbolForNotify, `Tier ${tier.tier_number} fallback sell failed - ${result.failure}`)
-    return { filled: false, fillPrice: 0, orderId: null, closeStatus: null }
+    let restoredStopId: string | null = null
+    if (stopOrderId) {
+      try {
+        const restored = await placeOrder({
+          symbol: optionSymbol, qty: remaining, side: 'sell', type: 'stop',
+          stopPrice, timeInForce: 'day', clientOrderId: restoreClientOrderId
+        })
+        restoredStopId = restored.id
+      } catch (e) {
+        await notifyManualReview(symbolForNotify, `CRITICAL: stop cancelled to attempt a tier sell, the sell then failed, AND restoring the stop ALSO failed - position is naked: ${describeAlpacaError(e)}`)
+      }
+    }
+    await notifyManualReview(symbolForNotify, `Tier ${tier.tier_number}${tier.is_runner ? ' (runner)' : ''} fallback sell failed - ${result.failure}${restoredStopId ? ' (stop restored)' : ''}`)
+    return { filled: false, fillPrice: 0, orderId: null, closeStatus: null, stopOrderIdAfterAttempt: restoredStopId }
   }
-  return { filled: true, fillPrice: bid, orderId: result.orderId, closeStatus: null }
+
+  return {
+    filled: true, fillPrice: bid, orderId: result.orderId,
+    closeStatus: tier.is_runner ? (hitTarget ? 'closed_target' : 'closed_time_lock') : null,
+    // Intentionally not restored - the caller's existing tier-fill branch
+    // places the correctly-ratcheted (breakeven, reduced qty) replacement.
+    stopOrderIdAfterAttempt: null
+  }
 }
 
 const runOnce = async (): Promise<{ managed: number; closed: number }> => {
@@ -323,6 +356,13 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
       // unique/traceable (see clientOrderIds.ts).
       let stopReplaceAttempt = tiers.filter(t => !t.is_runner && t.filled_at).length
       let closeStatus: string | null = null
+      // The fallback tier sell below cancels this to free up quantity Alpaca
+      // would otherwise reject the sell as "uncovered" against - tracked
+      // locally (and persisted immediately if it changes) so a later tier in
+      // the SAME run, or a later run, always cancels/checks the real current
+      // resting order, never a stale id.
+      let currentStopOrderId = position.stop_order_id
+      const currentStopPrice = position.premium_entry * (1 - (position.stop_pct ?? 0.25))
 
       for (const tier of unfilledTiers) {
         let filled = false
@@ -359,7 +399,8 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           } else if (order && ['canceled', 'expired', 'rejected'].includes(order.status)) {
             await notifyManualReview(position.underlying_symbol, `Tier ${tier.tier_number} resting order ${order.status} unexpectedly - falling back to bot-polled close`)
             const fb = await attemptFallbackTierSell(
-              position.option_symbol, tier, quote.bid, remaining, currentPct, pastTimeLock, position.underlying_symbol, ids.tier(tier.tier_number)
+              position.option_symbol, tier, quote.bid, remaining, currentPct, pastTimeLock, position.underlying_symbol, ids.tier(tier.tier_number),
+              currentStopOrderId, currentStopPrice, ids.stopRestore()
             )
             if (fb.filled) {
               filled = true
@@ -368,6 +409,9 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
               await supabase.from('option_position_tiers').update({
                 filled_at: now.toISOString(), fill_price: fb.fillPrice, order_id: fb.orderId
               }).eq('id', tier.id)
+            } else if (fb.stopOrderIdAfterAttempt !== currentStopOrderId) {
+              currentStopOrderId = fb.stopOrderIdAfterAttempt
+              await supabase.from('option_positions').update({ stop_order_id: currentStopOrderId }).eq('id', position.id)
             }
           }
           // else: still resting (new/accepted/pending_new) below any
@@ -379,7 +423,8 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           // covers its own disjoint 1 contract.
           if (!tier.is_runner && hasRunner && remaining <= 1) continue
           const fb = await attemptFallbackTierSell(
-            position.option_symbol, tier, quote.bid, remaining, currentPct, pastTimeLock, position.underlying_symbol, ids.tier(tier.tier_number)
+            position.option_symbol, tier, quote.bid, remaining, currentPct, pastTimeLock, position.underlying_symbol, ids.tier(tier.tier_number),
+            currentStopOrderId, currentStopPrice, ids.stopRestore()
           )
           if (fb.filled) {
             filled = true
@@ -388,6 +433,9 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
             await supabase.from('option_position_tiers').update({
               filled_at: now.toISOString(), fill_price: fb.fillPrice, order_id: fb.orderId
             }).eq('id', tier.id)
+          } else if (fb.stopOrderIdAfterAttempt !== currentStopOrderId) {
+            currentStopOrderId = fb.stopOrderIdAfterAttempt
+            await supabase.from('option_positions').update({ stop_order_id: currentStopOrderId }).eq('id', position.id)
           }
         }
 
@@ -406,7 +454,11 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
         // contract plan's last fixed-tier fill never closed the position at
         // all (there was no runner branch to do it), leaving remaining_
         // contracts at 0 but status stuck 'open' indefinitely.
-        if (position.stop_order_id) await cancelOrder(position.stop_order_id)
+        // currentStopOrderId (not position.stop_order_id) - the fallback
+        // sell above already cancelled the resting stop to free quantity for
+        // the sell itself, so this is normally a harmless no-op on an
+        // already-gone order, kept for the rare case nothing above touched it.
+        if (currentStopOrderId) await cancelOrder(currentStopOrderId)
         await supabase.from('option_positions').update({
           status: closeStatus ?? 'closed_target', remaining_contracts: 0, closed_at: now.toISOString()
         }).eq('id', position.id)
@@ -422,7 +474,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
         const newStopPrice = position.premium_entry * (1 - BREAKEVEN_PROTECTION_STOP_PCT)
         let newStopOrderId: string | null = null
 
-        if (position.stop_order_id) await cancelOrder(position.stop_order_id)
+        if (currentStopOrderId) await cancelOrder(currentStopOrderId)
         try {
           const newStopOrder = await placeOrder({
             symbol: position.option_symbol, qty: remaining, side: 'sell', type: 'stop',

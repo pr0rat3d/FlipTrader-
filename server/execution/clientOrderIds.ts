@@ -27,5 +27,11 @@ export const optionClientOrderIds = (profitTargetId: string) => ({
   // even to already-cancelled orders, so `hardStop`'s id can't be reused.
   // `attempt` = how many tiers have filled so far, keeping each replacement
   // deterministic/traceable rather than a raw timestamp.
-  stopReplace: (attempt: number) => `opt-stopreplace${attempt}-${profitTargetId}`
+  stopReplace: (attempt: number) => `opt-stopreplace${attempt}-${profitTargetId}`,
+  // Restoring the SAME stop after a tier-fallback sell attempt failed post-
+  // cancel (2026-07-29 fix - see options-bot memory for the "uncovered
+  // option contracts" root cause) - a raw timestamp here, not an attempt
+  // counter, since this is a rare recovery path with no natural sequence
+  // number and just needs to be unique per attempt.
+  stopRestore: () => `opt-stoprestore-${Date.now()}-${profitTargetId}`
 })
