@@ -83,7 +83,17 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
 // mix decision, not a confidence-floor tweak - kept as its own set for
 // clarity even though the floors above still exist for ORB/IV/STTF (in
 // case this ever gets reverted, their calibration is still there).
-const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF'])
+//
+// TTTF added 2026-07-30: consistently the worst performer of the three live
+// types in every 90-day backtest variant (-$1,184 to -$1,323, worst win
+// rate), and its real trade debut agreed rather than contradicted that -
+// 5 real trades on 2026-07-29, net -$144, 2 wins/3 losses. No tension
+// between backtest and live here (unlike DIV, which genuinely needed
+// investigating because its backtest and live record disagreed) - both
+// sources say the same thing, so disabled rather than patched further. See
+// options-bot memory for the full TTTF momentum-reset gate test that was
+// tried and rejected before this decision.
+const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF', 'TTTF'])
 
 // DIV trend-day gate, shipped 2026-07-23 after a real incident: 10 straight
 // bullish DIV entries fired into a genuine gap-down-and-continue morning
