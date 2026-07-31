@@ -3,7 +3,7 @@ import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
-import { getOrder, placeOrder, cancelOrder, getOptionQuote, describeAlpacaError } from '../../server/execution/alpacaClient.js'
+import { getOrder, getOpenOrders, placeOrder, cancelOrder, getOptionQuote, describeAlpacaError } from '../../server/execution/alpacaClient.js'
 import { optionClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import {
   RUNNER_TIME_LOCK_HOUR_ET, RUNNER_TIME_LOCK_MINUTE_ET, RUNNER_TIME_LOCK_MIN_PCT,
@@ -475,17 +475,51 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
         let newStopOrderId: string | null = null
 
         if (currentStopOrderId) await cancelOrder(currentStopOrderId)
-        try {
-          const newStopOrder = await placeOrder({
-            symbol: position.option_symbol, qty: remaining, side: 'sell', type: 'stop',
-            stopPrice: newStopPrice, timeInForce: 'day', clientOrderId: ids.stopReplace(stopReplaceAttempt)
-          })
-          newStopOrderId = newStopOrder.id
-        } catch (e) {
-          await supabase.from('option_positions').update({
-            needs_manual_review: true, review_reason: `stop replace after tier fill failed - position unprotected: ${describeAlpacaError(e)}`
-          }).eq('id', position.id)
-          await notifyManualReview(position.underlying_symbol, `CRITICAL: stop replace failed after tier fill - position now unprotected - ${describeAlpacaError(e)}`)
+
+        // 2026-07-31 fix: a concurrent overlapping invocation (cron-job.org
+        // retrying a "timed out" request while the first is still running -
+        // see this file's own header comment on that risk) can reach this
+        // exact step at the same time, both computing the same
+        // stopReplaceAttempt and racing to place a stop with the identical
+        // client_order_id. Found live: the loser's placeOrder failed with
+        // "client_order_id must be unique", and its failure handler then
+        // blindly wrote stop_order_id: null over the winner's already-
+        // correct value - a real, working resting stop protecting a real
+        // live position became invisible to the DB and every future poll.
+        // Checking Alpaca's own open orders first (not just trusting our
+        // own placeOrder outcome, before AND after attempting it) makes
+        // this idempotent: whichever invocation actually created the stop,
+        // we adopt it rather than risk overwriting it with null.
+        const optionSymbol = position.option_symbol
+        const findRestingStop = async () => {
+          const openOrders = await getOpenOrders(optionSymbol)
+          return openOrders?.find(o => o.type === 'stop' && o.side === 'sell') ?? null
+        }
+
+        const preExistingStop = await findRestingStop()
+        if (preExistingStop) {
+          newStopOrderId = preExistingStop.id
+        } else {
+          try {
+            const newStopOrder = await placeOrder({
+              symbol: position.option_symbol, qty: remaining, side: 'sell', type: 'stop',
+              stopPrice: newStopPrice, timeInForce: 'day', clientOrderId: ids.stopReplace(stopReplaceAttempt)
+            })
+            newStopOrderId = newStopOrder.id
+          } catch (e) {
+            // Could be a genuine failure, OR we lost a race that placed the
+            // real stop between the check above and this attempt - re-check
+            // before concluding the position is actually unprotected.
+            const raceWinnerStop = await findRestingStop()
+            if (raceWinnerStop) {
+              newStopOrderId = raceWinnerStop.id
+            } else {
+              await supabase.from('option_positions').update({
+                needs_manual_review: true, review_reason: `stop replace after tier fill failed - position unprotected: ${describeAlpacaError(e)}`
+              }).eq('id', position.id)
+              await notifyManualReview(position.underlying_symbol, `CRITICAL: stop replace failed after tier fill - position now unprotected - ${describeAlpacaError(e)}`)
+            }
+          }
         }
 
         await supabase.from('option_positions').update({
