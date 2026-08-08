@@ -195,6 +195,36 @@ const hasMomentumReset = async (symbol: string, direction: 'bullish' | 'bearish'
   return direction === 'bullish' ? data.some(r => r.macd_histogram <= 0) : data.some(r => r.macd_histogram >= 0)
 }
 
+// DTTF-specific: same mechanism as hasMomentumReset, but checked jointly
+// across SPY+IWM instead of a single symbol - DTTF is exempt from the
+// per-symbol gate above (a real RSI divergence is normally proof enough of a
+// fresh extreme), but that exemption assumed re-entries would show up as
+// same-symbol repeats, which a per-symbol gate could at least see coming.
+// Found live 2026-08-06: DTTF fired bullish SPY/IWM confluence every ~3 min
+// for 18 straight minutes (17:24-17:42 UTC, confidence 0.70-0.85) while SPY
+// sat in a $767.93-768.23 band (0.04%) - dead flat. 7 real entries (2 SPY, 5
+// IWM) resulted, alternating symbols, so no single symbol ever repeated
+// often enough for a per-symbol check to fire even if DTTF weren't already
+// exempt from it - and every one stopped out on 0DTE gamma noise alone, with
+// the underlying never actually moving. Gated the same way IV/ORB/DIV are
+// (see below): after a same-direction SPY-or-IWM position closes today, no
+// new DTTF entry in that direction until a reset is seen on EITHER symbol's
+// histogram - a real pullback in either leg of the pair counts as fresh
+// evidence, matching DTTF's own "the pair moves together" thesis.
+const hasMomentumResetJoint = async (symbols: string[], direction: 'bullish' | 'bearish', sinceIso: string): Promise<boolean> => {
+  const { data, error } = await supabase
+    .from('indicator_snapshots')
+    .select('macd_histogram')
+    .in('symbol', symbols)
+    .eq('category', 'day_trade')
+    .gt('timestamp', sinceIso)
+    .not('macd_histogram', 'is', null)
+  if (error) throw error
+  if (!data || data.length === 0) return false
+  return direction === 'bullish' ? data.some(r => r.macd_histogram <= 0) : data.some(r => r.macd_histogram >= 0)
+}
+const DTTF_JOINT_RESET_SYMBOLS = ['SPY', 'IWM']
+
 interface OpenLeg {
   id: string
   symbol: string
@@ -451,6 +481,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const lastClosedAt = lastClosedRows?.[0]?.closed_at
         if (lastClosedAt && nyDateKey(lastClosedAt) === today) {
           const reset = await hasMomentumReset(leg.symbol, direction, lastClosedAt)
+          if (!reset) continue
+        }
+      }
+
+      // DTTF joint SPY+IWM gate - see hasMomentumResetJoint above for the
+      // 2026-08-06 incident this targets. Only applies when this leg's own
+      // symbol is one of the two DTTF is jointly gated on; a DTTF triggered
+      // by e.g. QQQ+IWM falls outside this specific fix's scope.
+      if (ttfStatus === 'DTTF' && DTTF_JOINT_RESET_SYMBOLS.includes(leg.symbol)) {
+        const { data: lastJointClosedRows, error: lastJointClosedError } = await supabase
+          .from('option_positions')
+          .select('closed_at')
+          .in('underlying_symbol', DTTF_JOINT_RESET_SYMBOLS)
+          .eq('direction', direction)
+          .not('closed_at', 'is', null)
+          .order('closed_at', { ascending: false })
+          .limit(1)
+        if (lastJointClosedError) throw lastJointClosedError
+        const lastJointClosedAt = lastJointClosedRows?.[0]?.closed_at
+        if (lastJointClosedAt && nyDateKey(lastJointClosedAt) === today) {
+          const reset = await hasMomentumResetJoint(DTTF_JOINT_RESET_SYMBOLS, direction, lastJointClosedAt)
           if (!reset) continue
         }
       }
