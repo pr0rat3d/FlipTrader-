@@ -53,6 +53,7 @@ import { dailyLevelsAsOf, openingRangeFor, supportResistanceLevelsAsOf, sessionV
 import { analyzeCandles } from '../server/indicators.js'
 import { calculateATR, calculateMACD, calculateRSI, calculateADX } from '../src/lib/technicalIndicators.js'
 import { detectIVSignal } from '../server/signalDetection.js'
+import { scoreEmaBreakout, EmaBreakoutResult } from '../server/emaBreakout.js'
 import { detectCandlestickPattern } from '../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, isIntradayVwapAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
@@ -242,6 +243,10 @@ interface PerSymbolBar {
   histogramExpansion: 'bullish' | 'bearish' | null
   sessionCandlesSoFar: Candle[]
   globalIndex: number
+  // Three-part deterministic EMA9/21 breakout score - see server/emaBreakout.ts.
+  // Prototype-only (2026-08-10, --emab-min-score), computed unconditionally
+  // (cheap, pure math) so the EMAB filter section below can just read it.
+  emaBreakoutScore: EmaBreakoutResult | null
 }
 
 // Fixed-percentage exit ladder, no runner - sells exactly 1 contract per
@@ -336,6 +341,7 @@ const parseArgs = () => {
   const divAdxTrendGate = get('--div-adx-trend-gate') // e.g. "25" - blocks new DIV entries when the representative symbol's own 14-period ADX is at/above this level (a real trend day underway), DIV only - everything else unaffected.
   const adxcMinAdx = get('--adxc-min-adx') // e.g. "25" - enables the ADXC prototype signal (a new type, entirely separate from DIV/TTF/ORB) and sets its ADX floor. Undefined = signal doesn't exist for this run at all.
   const tttfMomentumResetGateArg = args.includes('--tttf-momentum-reset-gate') // 2026-07-29 finding: TTTF's exemption from the momentum-reset gate let a second bullish SPY/QQQ/IWM entry fire 14min after the first was already reversing (same symbol+direction), extending a losing move instead of avoiding it. Tests requiring the same MACD-histogram-crossed-zero reset TTTF's exempt from today, everything else unchanged.
+  const emabMinScore = get('--emab-min-score') // e.g. "70" - enables the EMAB prototype signal (EMA9/21 trend + swing-level breakout + volume + 2:1 R:R, server/emaBreakout.ts), entirely separate from DIV/TTF/ORB/ADXC. Undefined = signal doesn't exist for this run at all.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -371,12 +377,13 @@ const parseArgs = () => {
     divAdxTrendGate: divAdxTrendGate ? parseFloat(divAdxTrendGate) : undefined,
     adxcMinAdx: adxcMinAdx ? parseFloat(adxcMinAdx) : undefined,
     tttfMomentumResetGate: tttfMomentumResetGateArg,
+    emabMinScore: emabMinScore ? parseFloat(emabMinScore) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -392,6 +399,7 @@ const main = async () => {
   console.log(`DIV ADX trend-day gate: ${divAdxTrendGate !== undefined ? `blocks new DIV entries when ADX >= ${divAdxTrendGate}` : 'off (live default)'}`)
   console.log(`ADXC prototype (trend continuation): ${adxcMinAdx !== undefined ? `ON, ADX >= ${adxcMinAdx}` : 'off (does not exist unless enabled)'}`)
   console.log(`TTTF momentum-reset gate: ${tttfMomentumResetGate ? 'ON (requires MACD-histogram reset, same as IV/ORB/DIV)' : 'off (live default: TTTF exempt)'}`)
+  console.log(`EMAB prototype (EMA9/21 breakout, structure-based stop): ${emabMinScore !== undefined ? `ON, score >= ${emabMinScore}` : 'off (does not exist unless enabled)'}`)
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
@@ -449,9 +457,13 @@ const main = async () => {
 
   const makeLeg = (
     ttfStatus: string, symbol: Symbol, direction: 'bullish' | 'bearish', confidence: number,
-    entryTime: Date, entryPrice: number, target50EMA: number, atr: number | null
+    entryTime: Date, entryPrice: number, target50EMA: number, atr: number | null,
+    // Optional structure-based stop, overriding the default ATR-based one -
+    // EMAB only (2026-08-10), everything else omits this and keeps the
+    // unchanged ATR behavior.
+    stopLossOverride?: number | null
   ): BacktestLeg => {
-    const stopLossPrice = stopLossFor(direction, entryPrice, atr)
+    const stopLossPrice = stopLossOverride !== undefined ? stopLossOverride : stopLossFor(direction, entryPrice, atr)
     const milestones = deriveMilestonePrices(entryPrice, target50EMA)
     return {
       id: nextLegId++, ttfStatus, symbol, direction, confidence, entryTimeIso: entryTime.toISOString(), status: 'open',
@@ -809,7 +821,8 @@ const main = async () => {
         adxDirection: latestAdx ? (latestAdx.pdi > latestAdx.mdi ? 'bullish' : 'bearish') : null,
         histogramExpansion: detectHistogramExpansion(macdData, HISTOGRAM_EXPANSION_BARS),
         sessionCandlesSoFar,
-        globalIndex: gi
+        globalIndex: gi,
+        emaBreakoutScore: scoreEmaBreakout(window)
       })
     }
 
@@ -1023,6 +1036,58 @@ const main = async () => {
       }
     }
 
+    // --- 8. EMAB (EMA9/21 breakout continuation, prototype 2026-08-10) ---
+    // Doesn't exist at all unless --emab-min-score is passed. Per symbol:
+    // server/emaBreakout.ts's scoreEmaBreakout already does the full
+    // trend/entry/risk-reward scoring off the same walk-forward-safe window
+    // computed above (no lookahead) - this block just filters on the
+    // resulting score/direction and requires entryPoints>0 AND
+    // riskRewardPoints>0 in addition to the score threshold (the "all three
+    // sub-scores must be >0" requirement isn't implied by the score gate
+    // alone - e.g. trend(50)+riskReward(10)+nothing-else could theoretically
+    // clear a low threshold with zero entry confirmation). Reuses ORB's
+    // index-count confidence tiering (same continuation trade shape - a
+    // structure-based stop instead of ATR is this signal's only real
+    // difference from ADXC/ORB) rather than inventing a new confidence
+    // scale from the 0-100 score directly.
+    if (emabMinScore !== undefined && !fullConfluenceFired) {
+      for (const direction of ['bullish', 'bearish'] as const) {
+        const qualifying = perSymbolSignals.filter(s =>
+          s.emaBreakoutScore !== null &&
+          s.emaBreakoutScore.direction === direction &&
+          s.emaBreakoutScore.score >= emabMinScore &&
+          s.emaBreakoutScore.entryPoints > 0 &&
+          s.emaBreakoutScore.riskRewardPoints > 0
+        )
+        if (qualifying.length < 1) continue
+
+        const representative = qualifying.find(s => s.symbol === 'SPY') || qualifying[0]
+        const patternMatch = detectCandlestickPattern(representative.sessionCandlesSoFar)
+        const confidence = applyConfidenceModifiers(orbBaseConfidence(qualifying.length), {
+          direction,
+          dailyEma50: null,
+          dailyEma200: null,
+          candlestickDirection: patternMatch?.direction ?? null,
+          orbBreakoutDirection: null,
+          vixChangePct: null,
+          now,
+          chopZoneStartMinutes, chopZoneEndMinutes
+        })
+
+        for (const s of qualifying) {
+          // riskRewardPoints > 0 (checked in the qualifying filter above)
+          // guarantees scoreEmaBreakout resolved both a stop and a target -
+          // see server/emaBreakout.ts.
+          const legStop = s.emaBreakoutScore!.stopLoss!
+          const legTarget = s.emaBreakoutScore!.target!
+          const leg = makeLeg('EMAB', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.atr, legStop)
+          legs.push(leg)
+          openLegsBySymbol[s.symbol].push(leg)
+          attemptGatedEntry('EMAB', s.symbol, direction, confidence, now, s.entryPrice, legTarget, s.globalIndex)
+        }
+      }
+    }
+
     for (const symbol of SYMBOLS) {
       const gi = indexByTime[symbol].get(t)
       if (gi !== undefined) lastCloseBySymbol[symbol] = intradayCandles[symbol][gi].close
@@ -1097,7 +1162,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
