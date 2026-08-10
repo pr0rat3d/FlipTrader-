@@ -292,14 +292,40 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
         }
 
         if (stopOrder && ['canceled', 'expired', 'rejected'].includes(stopOrder.status)) {
-          // Resting stop is gone but the position is still open - flag
-          // loudly, but don't `continue`: still worth managing tier/runner
-          // logic below even while unprotected, rather than freezing
-          // everything until a human notices.
-          await supabase.from('option_positions').update({
-            needs_manual_review: true, review_reason: `protective stop order ${stopOrder.status} unexpectedly - position unprotected`
-          }).eq('id', position.id)
-          await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status} - position unprotected`)
+          // Found live 2026-08-06: this read of position.stop_order_id can be
+          // STALE relative to Alpaca's actual state - a concurrent overlapping
+          // invocation (the exact race this file's header comment already
+          // warns about) can be mid-way through the tier-fill ratchet below
+          // (cancel old stop -> place new one -> write new stop_order_id),
+          // and if THIS invocation's query landed between the cancel and the
+          // DB write, it sees a genuinely-canceled order against a row that
+          // just hasn't caught up yet - a false "unprotected" alarm on a
+          // position a concurrent invocation is actively re-protecting.
+          // Confirmed: the flagged Aug 6 position had stop_pct already
+          // ratchet to breakeven+5%, proving the replace really did succeed,
+          // and it closed at target with no gap in real protection - only
+          // the alert itself was wrong. Same idempotent recheck the 07-31 fix
+          // added to the placement step itself: before concluding the
+          // position is really unprotected, ask Alpaca directly whether a
+          // replacement stop already exists.
+          const openOrders = await getOpenOrders(position.option_symbol)
+          const replacementStop = openOrders?.find(o => o.type === 'stop' && o.side === 'sell') ?? null
+
+          if (replacementStop) {
+            if (replacementStop.id !== position.stop_order_id) {
+              position.stop_order_id = replacementStop.id
+              await supabase.from('option_positions').update({ stop_order_id: replacementStop.id }).eq('id', position.id)
+            }
+          } else {
+            // Resting stop is genuinely gone but the position is still open -
+            // flag loudly, but don't `continue`: still worth managing
+            // tier/runner logic below even while unprotected, rather than
+            // freezing everything until a human notices.
+            await supabase.from('option_positions').update({
+              needs_manual_review: true, review_reason: `protective stop order ${stopOrder.status} unexpectedly - position unprotected`
+            }).eq('id', position.id)
+            await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status} - position unprotected`)
+          }
         }
       } else {
         const adverseMove = (position.premium_entry - quote.bid) / position.premium_entry
