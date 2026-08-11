@@ -38,5 +38,10 @@ export const optionClientOrderIds = (profitTargetId: string) => ({
   // resting stop at all (2026-08-11 fix) - same "raw timestamp, no natural
   // sequence number" reasoning as stopRestore, since this can in principle
   // fire on repeated polls if healing itself keeps failing.
-  stopHeal: () => `opt-stopheal-${Date.now()}-${profitTargetId}`
+  stopHeal: () => `opt-stopheal-${Date.now()}-${profitTargetId}`,
+  // Market-flatten variant of the above (2026-08-11 fix) - used instead of
+  // stopHeal when price has already breached the intended stop level by the
+  // time the heal check runs, so a passive stop order would be invalid
+  // (Alpaca rejects a sell-stop priced above the current market).
+  stopHealMarketSell: () => `opt-stophealsell-${Date.now()}-${profitTargetId}`
 })

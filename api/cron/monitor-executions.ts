@@ -330,24 +330,60 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
             // instead of only alerting and hoping a human sees it in time,
             // attempt to place a fresh protective stop right here, every
             // poll, for as long as one is missing.
-            const healStopPrice = position.premium_entry * (1 - (position.stop_pct ?? 0.25))
-            try {
-              const healedStop = await placeOrder({
-                symbol: position.option_symbol, qty: position.remaining_contracts, side: 'sell', type: 'stop',
-                stopPrice: healStopPrice, timeInForce: 'day', clientOrderId: ids.stopHeal()
-              })
-              position.stop_order_id = healedStop.id
-              await supabase.from('option_positions').update({
-                stop_order_id: healedStop.id, needs_manual_review: true,
-                review_reason: `protective stop order ${stopOrder.status} unexpectedly - auto-healed with a fresh stop at $${healStopPrice.toFixed(2)}, please verify`
-              }).eq('id', position.id)
-              await notifyManualReview(position.underlying_symbol, `Protective stop was ${stopOrder.status} unexpectedly - auto-healed with a new stop at $${healStopPrice.toFixed(2)}, please verify`)
-            } catch (e) {
-              await supabase.from('option_positions').update({
-                needs_manual_review: true,
-                review_reason: `protective stop order ${stopOrder.status} unexpectedly, AND the auto-heal placement also failed - position unprotected: ${describeAlpacaError(e)}`
-              }).eq('id', position.id)
-              await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status} AND auto-heal failed - position unprotected - ${describeAlpacaError(e)}`)
+            const healAdverseMove = (position.premium_entry - quote.bid) / position.premium_entry
+            const healStopPct = position.stop_pct ?? 0.25
+            const healStopPrice = position.premium_entry * (1 - healStopPct)
+
+            if (healAdverseMove >= healStopPct) {
+              // Found live 2026-08-11 (same incident): by the time this ran,
+              // price had ALREADY fallen through the intended stop level
+              // (the gap between the ratchet's original failed attempt and
+              // this retry was enough for the underlying to move that far).
+              // A passive stop order priced above the current market is
+              // invalid - Alpaca rejects it outright ("stop price must be
+              // less than current price") - so this kept retrying and
+              // failing every single poll instead of ever protecting
+              // anything. Mirrors the sibling "no stop_order_id at all"
+              // fallback path below: once the level's already breached,
+              // there's nothing a passive order can do - flatten at market
+              // immediately instead.
+              const result = await sellAtMarket(position.option_symbol, position.remaining_contracts, ids.stopHealMarketSell())
+              if (result.orderId) {
+                await cancelUnfilledTierOrders(position.option_position_tiers || [])
+                await supabase.from('option_positions').update({
+                  status: healStopPct > 0 ? 'closed_hard_stop' : 'closed_stop',
+                  remaining_contracts: 0, closed_at: now.toISOString(),
+                  review_reason: `protective stop order ${stopOrder.status} unexpectedly, and price had already breached the stop level by the time this was caught (${(healAdverseMove * 100).toFixed(1)}% adverse, threshold ${(healStopPct * 100).toFixed(0)}%) - flattened at market instead of attempting an invalid stop`
+                }).eq('id', position.id)
+                await notifyManualReview(position.underlying_symbol, `Protective stop was ${stopOrder.status} unexpectedly and price already breached the stop level - flattened at market (${(healAdverseMove * 100).toFixed(1)}% adverse)`)
+                closed++
+                continue
+              } else {
+                await supabase.from('option_positions').update({
+                  needs_manual_review: true,
+                  review_reason: `protective stop order ${stopOrder.status} unexpectedly, price already breached the stop level, AND the market flatten also failed - position unprotected: ${result.failure}`
+                }).eq('id', position.id)
+                await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status}, price already breached the stop level, AND market flatten failed - ${result.failure}`)
+              }
+            } else {
+              try {
+                const healedStop = await placeOrder({
+                  symbol: position.option_symbol, qty: position.remaining_contracts, side: 'sell', type: 'stop',
+                  stopPrice: healStopPrice, timeInForce: 'day', clientOrderId: ids.stopHeal()
+                })
+                position.stop_order_id = healedStop.id
+                await supabase.from('option_positions').update({
+                  stop_order_id: healedStop.id, needs_manual_review: true,
+                  review_reason: `protective stop order ${stopOrder.status} unexpectedly - auto-healed with a fresh stop at $${healStopPrice.toFixed(2)}, please verify`
+                }).eq('id', position.id)
+                await notifyManualReview(position.underlying_symbol, `Protective stop was ${stopOrder.status} unexpectedly - auto-healed with a new stop at $${healStopPrice.toFixed(2)}, please verify`)
+              } catch (e) {
+                await supabase.from('option_positions').update({
+                  needs_manual_review: true,
+                  review_reason: `protective stop order ${stopOrder.status} unexpectedly, AND the auto-heal placement also failed - position unprotected: ${describeAlpacaError(e)}`
+                }).eq('id', position.id)
+                await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status} AND auto-heal failed - position unprotected - ${describeAlpacaError(e)}`)
+              }
             }
           }
         }
