@@ -229,6 +229,18 @@ const hasMomentumResetJoint = async (symbols: string[], direction: 'bullish' | '
 }
 const DTTF_JOINT_RESET_SYMBOLS = ['SPY', 'IWM']
 
+// DIV joint SPY+QQQ gate (2026-08-11) - same alternating-symbol evasion
+// DTTF's SPY/IWM gate above targets (2026-08-06), found on DIV/SPY-QQQ
+// specifically instead: 5 DIV alerts fired every ~3 min from 16:03-16:15 UTC,
+// alternating SPY/QQQ. DIV's own per-symbol gate below DID partially work
+// (each fire only got ONE new leg through, not both, since the other symbol
+// was still blocked) - but couldn't stop the alternating pattern itself,
+// since each symbol's OWN histogram kept genuinely crossing zero between
+// fires (real chop, not a stale re-fire slipping past a bug). Layered ON TOP
+// of the existing per-symbol DIV gate, not a replacement - unlike DTTF, DIV
+// keeps both.
+const DIV_JOINT_RESET_SYMBOLS = ['SPY', 'QQQ']
+
 interface OpenLeg {
   id: string
   symbol: string
@@ -485,6 +497,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const lastClosedAt = lastClosedRows?.[0]?.closed_at
         if (lastClosedAt && nyDateKey(lastClosedAt) === today) {
           const reset = await hasMomentumReset(leg.symbol, direction, lastClosedAt)
+          if (!reset) continue
+        }
+      }
+
+      // DIV joint SPY+QQQ gate - see DIV_JOINT_RESET_SYMBOLS above for the
+      // 2026-08-11 incident this targets. Only applies when this leg's own
+      // symbol is one of the two DIV is jointly gated on; a DIV triggered by
+      // e.g. QQQ+IWM falls outside this specific fix's scope, same caveat
+      // DTTF's joint gate below already has.
+      if (ttfStatus === 'DIV' && DIV_JOINT_RESET_SYMBOLS.includes(leg.symbol)) {
+        const { data: lastDivJointClosedRows, error: lastDivJointClosedError } = await supabase
+          .from('option_positions')
+          .select('closed_at')
+          .in('underlying_symbol', DIV_JOINT_RESET_SYMBOLS)
+          .eq('direction', direction)
+          .not('closed_at', 'is', null)
+          .order('closed_at', { ascending: false })
+          .limit(1)
+        if (lastDivJointClosedError) throw lastDivJointClosedError
+        const lastDivJointClosedAt = lastDivJointClosedRows?.[0]?.closed_at
+        if (lastDivJointClosedAt && nyDateKey(lastDivJointClosedAt) === today) {
+          const reset = await hasMomentumResetJoint(DIV_JOINT_RESET_SYMBOLS, direction, lastDivJointClosedAt)
           if (!reset) continue
         }
       }
