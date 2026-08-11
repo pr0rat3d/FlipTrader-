@@ -16,6 +16,7 @@ import { detectCandlestickPattern } from '../../server/candlestickPatterns.js'
 import { applyConfidenceModifiers, isPrimeTime } from '../../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, continuationTargetPrice } from '../../server/orb.js'
 import { getQuote } from '../../server/finnhub.js'
+import { detectPullbackConfluence } from '../../server/pullbackConfluence.js'
 
 // VIXY (VIX-futures ETF proxy - see confidenceModifiers.ts) via Finnhub, not
 // Twelve Data - a separate quota from the per-minute credit budget the three
@@ -82,6 +83,13 @@ export const shouldRunThisMinute = (now: Date): boolean => isPrimeTime(now) || n
 // (STF's 0.55, and IV's weakest 2-index gap-fill case at 0.585) while still notifying
 // on everything else. Adjust freely; nothing downstream depends on this exact value.
 const NOTIFICATION_CONFIDENCE_THRESHOLD = 0.6
+
+// PBC (Pullback Confluence, 2026-08-11): deliberately gated at the DB-insert
+// level, not just the notification level like every other type - this
+// signal is meant to be rare/high-quality by design (3-5/day target), so
+// sub-threshold near-misses aren't logged live at all. Every insert already
+// implies score >= this, so it always notifies too.
+const PBC_MIN_SCORE = 75
 
 interface PerSymbolSignal {
   symbol: string
@@ -550,7 +558,76 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, divFired, ivFired, orbFired })
+    // PBC (Pullback Confluence): alert-only, single-symbol structural setup -
+    // unlike TTTF/DIV/IV/ORB's cross-index confluence thesis, each symbol's
+    // pullback is its own independent setup, so each qualifying symbol gets
+    // its own alert row rather than being batched into a joint SPY/QQQ-style
+    // alert. Never suppressed by full confluence or the other types firing
+    // this run (independent condition, same as DIV/IV/ORB's mutual
+    // independence). Permanently excluded from real trading via
+    // DISABLED_SIGNAL_TYPES in execute-alerts.ts - by design, not "until
+    // validated."
+    const pbcFired: string[] = []
+
+    for (const symbol of CONFLUENCE_INDICES) {
+      const symbolSignal = perSymbolSignals.find(s => s.symbol === symbol)
+      if (!symbolSignal) continue
+
+      const dailyLevels = await getDailyLevels(symbol)
+      const pbcVwap = calculateSessionVWAP(symbolSignal.candles)
+
+      for (const direction of ['bullish', 'bearish'] as const) {
+        const pbc = detectPullbackConfluence(symbolSignal.candles, direction, dailyLevels?.dailyEma50 ?? null, dailyLevels?.dailyEma200 ?? null, pbcVwap)
+        if (!pbc || pbc.score < PBC_MIN_SCORE) continue
+
+        const entryTime = new Date()
+        const confidence = pbc.score / 100
+        const milestones = deriveMilestonePrices(pbc.entryPrice, pbc.target)
+
+        const { data, error } = await supabase
+          .from('day_trade_alerts')
+          .insert({
+            symbol,
+            ttf_status: 'PBC',
+            rsi_divergence: null,
+            macd_curl: direction,
+            indices_triggered: [symbol],
+            entry_price: pbc.entryPrice,
+            entry_time: entryTime,
+            target_50ema: pbc.target,
+            stop_loss_price: pbc.stopLoss,
+            confidence,
+            timestamp: entryTime
+          })
+          .select()
+
+        if (error) throw error
+
+        if (data && data[0]) {
+          await supabase.from('profit_targets').insert({
+            day_trade_alert_id: data[0].id,
+            symbol,
+            entry_price: pbc.entryPrice,
+            entry_time: entryTime,
+            target_50ema_price: pbc.target,
+            stop_loss_price: pbc.stopLoss,
+            milestone_10_price: milestones.milestone10,
+            milestone_20_price: milestones.milestone20,
+            milestone_30_price: milestones.milestone30
+          })
+
+          pbcFired.push(symbol)
+
+          await sendToTopic(
+            ALERTS_TOPIC,
+            `Pullback Confluence: ${symbol}`,
+            `${direction === 'bullish' ? 'Bullish' : 'Bearish'} pullback bounce, score ${pbc.score}/100 - entry $${pbc.entryPrice.toFixed(2)}, stop $${pbc.stopLoss.toFixed(2)}`
+          )
+        }
+      }
+    }
+
+    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, divFired, ivFired, orbFired, pbcFired })
   } catch (error) {
     console.error('Error in scan-confluence:', error)
     res.status(500).json({ error: String(error) })

@@ -54,6 +54,7 @@ import { analyzeCandles } from '../server/indicators.js'
 import { calculateATR, calculateMACD, calculateRSI, calculateADX } from '../src/lib/technicalIndicators.js'
 import { detectIVSignal } from '../server/signalDetection.js'
 import { scoreEmaBreakout, EmaBreakoutResult } from '../server/emaBreakout.js'
+import { detectPullbackConfluence } from '../server/pullbackConfluence.js'
 import { detectCandlestickPattern } from '../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, isIntradayVwapAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
@@ -241,6 +242,12 @@ interface PerSymbolBar {
   // than shrinking toward zero (DIV's anticipated-reversal thesis).
   // Prototype-only (2026-07-24, --adxc-min-adx).
   histogramExpansion: 'bullish' | 'bearish' | null
+  // Full rolling window (crosses session boundaries), NOT sessionCandlesSoFar -
+  // PBC's swing-extreme lookback needs the same continuously-rolling window
+  // MACD_CURL_LOOKBACK_BARS already established the reasoning for (a session-
+  // reset lookback misses structure from late in the prior session, found
+  // live 2026-07-15). Prototype-only (2026-08-11, --pbc-min-score).
+  window: Candle[]
   sessionCandlesSoFar: Candle[]
   globalIndex: number
   // Three-part deterministic EMA9/21 breakout score - see server/emaBreakout.ts.
@@ -342,6 +349,7 @@ const parseArgs = () => {
   const adxcMinAdx = get('--adxc-min-adx') // e.g. "25" - enables the ADXC prototype signal (a new type, entirely separate from DIV/TTF/ORB) and sets its ADX floor. Undefined = signal doesn't exist for this run at all.
   const tttfMomentumResetGateArg = args.includes('--tttf-momentum-reset-gate') // 2026-07-29 finding: TTTF's exemption from the momentum-reset gate let a second bullish SPY/QQQ/IWM entry fire 14min after the first was already reversing (same symbol+direction), extending a losing move instead of avoiding it. Tests requiring the same MACD-histogram-crossed-zero reset TTTF's exempt from today, everything else unchanged.
   const emabMinScore = get('--emab-min-score') // e.g. "70" - enables the EMAB prototype signal (EMA9/21 trend + swing-level breakout + volume + 2:1 R:R, server/emaBreakout.ts), entirely separate from DIV/TTF/ORB/ADXC. Undefined = signal doesn't exist for this run at all.
+  const pbcMinScore = get('--pbc-min-score') // e.g. "75" - enables the PBC (Pullback Confluence) prototype signal (5m EMA9/20 + daily-trend + pullback/VWAP-hold + consolidation/MACD/volume bounce, server/pullbackConfluence.ts), alert-only in real life (PBC is in DISABLED_SIGNAL_TYPES) but tradeable here to read win-rate/entry-count. Undefined = signal doesn't exist for this run at all.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -378,12 +386,13 @@ const parseArgs = () => {
     adxcMinAdx: adxcMinAdx ? parseFloat(adxcMinAdx) : undefined,
     tttfMomentumResetGate: tttfMomentumResetGateArg,
     emabMinScore: emabMinScore ? parseFloat(emabMinScore) : undefined,
+    pbcMinScore: pbcMinScore ? parseFloat(pbcMinScore) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -400,6 +409,7 @@ const main = async () => {
   console.log(`ADXC prototype (trend continuation): ${adxcMinAdx !== undefined ? `ON, ADX >= ${adxcMinAdx}` : 'off (does not exist unless enabled)'}`)
   console.log(`TTTF momentum-reset gate: ${tttfMomentumResetGate ? 'ON (requires MACD-histogram reset, same as IV/ORB/DIV)' : 'off (live default: TTTF exempt)'}`)
   console.log(`EMAB prototype (EMA9/21 breakout, structure-based stop): ${emabMinScore !== undefined ? `ON, score >= ${emabMinScore}` : 'off (does not exist unless enabled)'}`)
+  console.log(`PBC prototype (pullback confluence, alert-only in real life): ${pbcMinScore !== undefined ? `ON, score >= ${pbcMinScore}` : 'off (does not exist unless enabled)'}`)
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
@@ -820,6 +830,7 @@ const main = async () => {
         adx: latestAdx?.adx ?? null,
         adxDirection: latestAdx ? (latestAdx.pdi > latestAdx.mdi ? 'bullish' : 'bearish') : null,
         histogramExpansion: detectHistogramExpansion(macdData, HISTOGRAM_EXPANSION_BARS),
+        window,
         sessionCandlesSoFar,
         globalIndex: gi,
         emaBreakoutScore: scoreEmaBreakout(window)
@@ -1088,6 +1099,33 @@ const main = async () => {
       }
     }
 
+    // --- 9. PBC (Pullback Confluence, prototype 2026-08-11) ---
+    // Doesn't exist at all unless --pbc-min-score is passed. Alert-only in
+    // real life (PBC is in DISABLED_SIGNAL_TYPES, api/cron/execute-alerts.ts)
+    // - traded here anyway so the backtest can read a real win-rate/entry-
+    // count number before it starts alerting daily, same discipline as every
+    // other prototype in this file. Single-symbol structural setup, not a
+    // cross-index confluence thesis - each symbol scored independently.
+    if (pbcMinScore !== undefined) {
+      for (const symbol of SYMBOLS) {
+        const symbolSignal = perSymbolSignals.find(s => s.symbol === symbol)
+        if (!symbolSignal) continue
+
+        const dailyLevels = dailyLevelsAsOf(dailyCandles[symbol], dailyAsOf(symbol))
+        const vwap = sessionVWAPFor(symbolSignal.sessionCandlesSoFar)
+
+        for (const direction of ['bullish', 'bearish'] as const) {
+          const pbc = detectPullbackConfluence(symbolSignal.window, direction, dailyLevels?.dailyEma50 ?? null, dailyLevels?.dailyEma200 ?? null, vwap)
+          if (!pbc || pbc.score < pbcMinScore) continue
+
+          const leg = makeLeg('PBC', symbol, direction, pbc.score / 100, now, pbc.entryPrice, pbc.target, symbolSignal.atr, pbc.stopLoss)
+          legs.push(leg)
+          openLegsBySymbol[symbol].push(leg)
+          attemptGatedEntry('PBC', symbol, direction, pbc.score / 100, now, pbc.entryPrice, pbc.target, symbolSignal.globalIndex)
+        }
+      }
+    }
+
     for (const symbol of SYMBOLS) {
       const gi = indexByTime[symbol].get(t)
       if (gi !== undefined) lastCloseBySymbol[symbol] = intradayCandles[symbol][gi].close
@@ -1162,7 +1200,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
