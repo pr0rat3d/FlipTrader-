@@ -33,5 +33,10 @@ export const optionClientOrderIds = (profitTargetId: string) => ({
   // option contracts" root cause) - a raw timestamp here, not an attempt
   // counter, since this is a rare recovery path with no natural sequence
   // number and just needs to be unique per attempt.
-  stopRestore: () => `opt-stoprestore-${Date.now()}-${profitTargetId}`
+  stopRestore: () => `opt-stoprestore-${Date.now()}-${profitTargetId}`,
+  // Auto-heal placement when the stop-health check finds a position with no
+  // resting stop at all (2026-08-11 fix) - same "raw timestamp, no natural
+  // sequence number" reasoning as stopRestore, since this can in principle
+  // fire on repeated polls if healing itself keeps failing.
+  stopHeal: () => `opt-stopheal-${Date.now()}-${profitTargetId}`
 })

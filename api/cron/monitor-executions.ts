@@ -317,14 +317,38 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
               await supabase.from('option_positions').update({ stop_order_id: replacementStop.id }).eq('id', position.id)
             }
           } else {
-            // Resting stop is genuinely gone but the position is still open -
-            // flag loudly, but don't `continue`: still worth managing
-            // tier/runner logic below even while unprotected, rather than
-            // freezing everything until a human notices.
-            await supabase.from('option_positions').update({
-              needs_manual_review: true, review_reason: `protective stop order ${stopOrder.status} unexpectedly - position unprotected`
-            }).eq('id', position.id)
-            await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status} - position unprotected`)
+            // Genuinely no resting stop - found live 2026-08-11: a real
+            // position sat unprotected for the rest of the session after
+            // the tier-fill ratchet's own placement attempt (further below,
+            // "anyTierFilledThisRun") failed for some reason (exact cause
+            // not recoverable - Vercel's log retention had already rotated
+            // it out by the time this was investigated). The ratchet only
+            // ever runs ONCE, in the same poll a tier fill is detected -
+            // once that attempt fails, nothing ever retries it, since the
+            // tier already has filled_at set and won't trigger the ratchet
+            // branch again. This check now doubles as that missing retry:
+            // instead of only alerting and hoping a human sees it in time,
+            // attempt to place a fresh protective stop right here, every
+            // poll, for as long as one is missing.
+            const healStopPrice = position.premium_entry * (1 - (position.stop_pct ?? 0.25))
+            try {
+              const healedStop = await placeOrder({
+                symbol: position.option_symbol, qty: position.remaining_contracts, side: 'sell', type: 'stop',
+                stopPrice: healStopPrice, timeInForce: 'day', clientOrderId: ids.stopHeal()
+              })
+              position.stop_order_id = healedStop.id
+              await supabase.from('option_positions').update({
+                stop_order_id: healedStop.id, needs_manual_review: true,
+                review_reason: `protective stop order ${stopOrder.status} unexpectedly - auto-healed with a fresh stop at $${healStopPrice.toFixed(2)}, please verify`
+              }).eq('id', position.id)
+              await notifyManualReview(position.underlying_symbol, `Protective stop was ${stopOrder.status} unexpectedly - auto-healed with a new stop at $${healStopPrice.toFixed(2)}, please verify`)
+            } catch (e) {
+              await supabase.from('option_positions').update({
+                needs_manual_review: true,
+                review_reason: `protective stop order ${stopOrder.status} unexpectedly, AND the auto-heal placement also failed - position unprotected: ${describeAlpacaError(e)}`
+              }).eq('id', position.id)
+              await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status} AND auto-heal failed - position unprotected - ${describeAlpacaError(e)}`)
+            }
           }
         }
       } else {
@@ -499,57 +523,79 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
         // while cancel+new placeOrder works cleanly regardless of status.
         const newStopPrice = position.premium_entry * (1 - BREAKEVEN_PROTECTION_STOP_PCT)
         let newStopOrderId: string | null = null
+        let ratchetFailure: string | null = null
 
-        if (currentStopOrderId) await cancelOrder(currentStopOrderId)
+        // 2026-08-11 fix: cancelOrder and the first findRestingStop() call
+        // below used to sit outside any try/catch - if EITHER threw (found
+        // live: a real position sat with a stale stop_order_id all session
+        // after one of these failed, exact cause not recoverable since
+        // Vercel's log retention had already rotated it out by the time this
+        // was investigated), execution jumped straight to this function's
+        // OUTER catch, which never reaches the final DB update below at all -
+        // remaining_contracts stays wrong (still shows the pre-tier-fill
+        // count) AND stop_order_id stays pointed at the now-genuinely-
+        // canceled old order, with only a generic outer-catch message
+        // instead of a clear trail. Wrapping the whole ratchet attempt
+        // ensures the final update (correct remaining_contracts, stop_order_id
+        // explicitly nulled rather than left stale) always runs, and the
+        // stop-health check above now self-heals a missing stop on the very
+        // next poll regardless of why this attempt failed.
+        try {
+          if (currentStopOrderId) await cancelOrder(currentStopOrderId)
 
-        // 2026-07-31 fix: a concurrent overlapping invocation (cron-job.org
-        // retrying a "timed out" request while the first is still running -
-        // see this file's own header comment on that risk) can reach this
-        // exact step at the same time, both computing the same
-        // stopReplaceAttempt and racing to place a stop with the identical
-        // client_order_id. Found live: the loser's placeOrder failed with
-        // "client_order_id must be unique", and its failure handler then
-        // blindly wrote stop_order_id: null over the winner's already-
-        // correct value - a real, working resting stop protecting a real
-        // live position became invisible to the DB and every future poll.
-        // Checking Alpaca's own open orders first (not just trusting our
-        // own placeOrder outcome, before AND after attempting it) makes
-        // this idempotent: whichever invocation actually created the stop,
-        // we adopt it rather than risk overwriting it with null.
-        const optionSymbol = position.option_symbol
-        const findRestingStop = async () => {
-          const openOrders = await getOpenOrders(optionSymbol)
-          return openOrders?.find(o => o.type === 'stop' && o.side === 'sell') ?? null
-        }
+          // 2026-07-31 fix: a concurrent overlapping invocation (cron-job.org
+          // retrying a "timed out" request while the first is still running -
+          // see this file's own header comment on that risk) can reach this
+          // exact step at the same time, both computing the same
+          // stopReplaceAttempt and racing to place a stop with the identical
+          // client_order_id. Found live: the loser's placeOrder failed with
+          // "client_order_id must be unique", and its failure handler then
+          // blindly wrote stop_order_id: null over the winner's already-
+          // correct value - a real, working resting stop protecting a real
+          // live position became invisible to the DB and every future poll.
+          // Checking Alpaca's own open orders first (not just trusting our
+          // own placeOrder outcome, before AND after attempting it) makes
+          // this idempotent: whichever invocation actually created the stop,
+          // we adopt it rather than risk overwriting it with null.
+          const optionSymbol = position.option_symbol
+          const findRestingStop = async () => {
+            const openOrders = await getOpenOrders(optionSymbol)
+            return openOrders?.find(o => o.type === 'stop' && o.side === 'sell') ?? null
+          }
 
-        const preExistingStop = await findRestingStop()
-        if (preExistingStop) {
-          newStopOrderId = preExistingStop.id
-        } else {
-          try {
-            const newStopOrder = await placeOrder({
-              symbol: position.option_symbol, qty: remaining, side: 'sell', type: 'stop',
-              stopPrice: newStopPrice, timeInForce: 'day', clientOrderId: ids.stopReplace(stopReplaceAttempt)
-            })
-            newStopOrderId = newStopOrder.id
-          } catch (e) {
-            // Could be a genuine failure, OR we lost a race that placed the
-            // real stop between the check above and this attempt - re-check
-            // before concluding the position is actually unprotected.
-            const raceWinnerStop = await findRestingStop()
-            if (raceWinnerStop) {
-              newStopOrderId = raceWinnerStop.id
-            } else {
-              await supabase.from('option_positions').update({
-                needs_manual_review: true, review_reason: `stop replace after tier fill failed - position unprotected: ${describeAlpacaError(e)}`
-              }).eq('id', position.id)
-              await notifyManualReview(position.underlying_symbol, `CRITICAL: stop replace failed after tier fill - position now unprotected - ${describeAlpacaError(e)}`)
+          const preExistingStop = await findRestingStop()
+          if (preExistingStop) {
+            newStopOrderId = preExistingStop.id
+          } else {
+            try {
+              const newStopOrder = await placeOrder({
+                symbol: position.option_symbol, qty: remaining, side: 'sell', type: 'stop',
+                stopPrice: newStopPrice, timeInForce: 'day', clientOrderId: ids.stopReplace(stopReplaceAttempt)
+              })
+              newStopOrderId = newStopOrder.id
+            } catch (e) {
+              // Could be a genuine failure, OR we lost a race that placed the
+              // real stop between the check above and this attempt - re-check
+              // before concluding the position is actually unprotected.
+              const raceWinnerStop = await findRestingStop()
+              if (raceWinnerStop) {
+                newStopOrderId = raceWinnerStop.id
+              } else {
+                ratchetFailure = describeAlpacaError(e)
+              }
             }
           }
+        } catch (e) {
+          ratchetFailure = describeAlpacaError(e)
+        }
+
+        if (ratchetFailure) {
+          await notifyManualReview(position.underlying_symbol, `CRITICAL: stop replace failed after tier fill - position now unprotected - ${ratchetFailure}`)
         }
 
         await supabase.from('option_positions').update({
-          remaining_contracts: remaining, stop_pct: BREAKEVEN_PROTECTION_STOP_PCT, stop_order_id: newStopOrderId
+          remaining_contracts: remaining, stop_pct: BREAKEVEN_PROTECTION_STOP_PCT, stop_order_id: newStopOrderId,
+          ...(ratchetFailure ? { needs_manual_review: true, review_reason: `stop replace after tier fill failed - position unprotected: ${ratchetFailure}` } : {})
         }).eq('id', position.id)
       }
     } catch (positionError) {
