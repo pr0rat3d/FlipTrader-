@@ -410,6 +410,30 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           }
           continue
         }
+
+        // 2026-08-12: a position with no stop_order_id at all (e.g. the
+        // initial placement at entry failed - execute-alerts.ts already
+        // flags this loudly when it happens) used to rely PERMANENTLY on
+        // the once-a-minute threshold check above instead of ever getting
+        // a real resting stop - unlike the "had one, then lost it" case
+        // above (which now self-heals), this path never attempted to
+        // place one. The level hasn't been breached yet here (checked
+        // above), so it's still safe to place a passive stop - best-effort,
+        // silent on failure since the bot-polled check above still
+        // protects this position every poll regardless of whether this
+        // succeeds; not a new CRITICAL condition on its own.
+        const healStopPrice = position.premium_entry * (1 - stopPct)
+        try {
+          const healedStop = await placeOrder({
+            symbol: position.option_symbol, qty: position.remaining_contracts, side: 'sell', type: 'stop',
+            stopPrice: healStopPrice, timeInForce: 'day', clientOrderId: ids.stopHeal()
+          })
+          await supabase.from('option_positions').update({ stop_order_id: healedStop.id }).eq('id', position.id)
+          console.log(`Placed missing resting stop for ${position.underlying_symbol} (${position.id}) at $${healStopPrice.toFixed(2)} - previously relying on bot-polled fallback only`)
+        } catch {
+          // Best-effort, will retry next poll - bot-polled threshold check
+          // above already covers this position in the meantime.
+        }
       }
 
       // --- Tier fills: each tier (fixed AND runner) got its own resting
