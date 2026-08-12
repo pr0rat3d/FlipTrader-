@@ -349,6 +349,7 @@ const parseArgs = () => {
   const divAdxTrendGate = get('--div-adx-trend-gate') // e.g. "25" - blocks new DIV entries when the representative symbol's own 14-period ADX is at/above this level (a real trend day underway), DIV only - everything else unaffected.
   const adxcMinAdx = get('--adxc-min-adx') // e.g. "25" - enables the ADXC prototype signal (a new type, entirely separate from DIV/TTF/ORB) and sets its ADX floor. Undefined = signal doesn't exist for this run at all.
   const tttfMomentumResetGateArg = args.includes('--tttf-momentum-reset-gate') // 2026-07-29 finding: TTTF's exemption from the momentum-reset gate let a second bullish SPY/QQQ/IWM entry fire 14min after the first was already reversing (same symbol+direction), extending a losing move instead of avoiding it. Tests requiring the same MACD-histogram-crossed-zero reset TTTF's exempt from today, everything else unchanged.
+  const remoraReversalBodyPct = get('--remora-reversal-body-pct') // e.g. "0.002" - overrides the default 0.005 (0.5%) single-candle reversal-body requirement in server/remora.ts, which never fired once across 90 real days at the default. Sweeping this to find where (if anywhere) real signal starts appearing.
   const remoraMinScore = get('--remora-min-score') // e.g. "75" - enables the REM (Remora) prototype signal (false-breakout/bounce off resistance-support, server/remora.ts), alert-only in real life (REM is in DISABLED_SIGNAL_TYPES) but tradeable here to read win-rate/entry-count. Undefined = signal doesn't exist for this run at all.
   const divJointResetGateArg = args.includes('--div-joint-reset-gate') // 2026-08-11 - live incident: DIV fired every ~3min alternating SPY/QQQ (16:03-16:15 UTC), each fire's per-symbol gate let it through since that symbol's OWN histogram kept genuinely resetting - same alternating-symbol shape as DTTF's 08-06 SPY/IWM incident. Tests extending the same joint-symbol reset gate to DIV/SPY-QQQ, layered on top of (not replacing) DIV's existing per-symbol gate.
   const emabMinScore = get('--emab-min-score') // e.g. "70" - enables the EMAB prototype signal (EMA9/21 trend + swing-level breakout + volume + 2:1 R:R, server/emaBreakout.ts), entirely separate from DIV/TTF/ORB/ADXC. Undefined = signal doesn't exist for this run at all.
@@ -392,12 +393,13 @@ const parseArgs = () => {
     pbcMinScore: pbcMinScore ? parseFloat(pbcMinScore) : undefined,
     divJointResetGate: divJointResetGateArg,
     remoraMinScore: remoraMinScore ? parseFloat(remoraMinScore) : undefined,
+    remoraReversalBodyPct: remoraReversalBodyPct ? parseFloat(remoraReversalBodyPct) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -1176,7 +1178,7 @@ const main = async () => {
         const vwap = sessionVWAPFor(symbolSignal.sessionCandlesSoFar)
 
         for (const direction of ['bullish', 'bearish'] as const) {
-          const rem = detectRemoraSetup(symbolSignal.window, direction, vwap)
+          const rem = detectRemoraSetup(symbolSignal.window, direction, vwap, remoraReversalBodyPct)
           if (!rem || rem.score < remoraMinScore) continue
 
           const leg = makeLeg('REM', symbol, direction, rem.score / 100, now, rem.entryPrice, rem.target, symbolSignal.atr, rem.stopLoss)

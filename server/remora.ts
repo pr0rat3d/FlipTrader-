@@ -75,14 +75,14 @@ interface ReversalInfo {
 // doji) - price is the lowest low (bullish) / highest high (bearish)
 // across every bar from the breakout through the reversal, the true
 // extreme of the whole failed move, used as the structural stop.
-const findReversal = (candles: Candle[], breakoutIndex: number, level: number, direction: 'bullish' | 'bearish'): ReversalInfo | null => {
+const findReversal = (candles: Candle[], breakoutIndex: number, level: number, direction: 'bullish' | 'bearish', reversalBodyMinPct: number): ReversalInfo | null => {
   const searchEnd = Math.min(candles.length - 1, breakoutIndex + REVERSAL_MAX_CANDLES)
   for (let i = breakoutIndex + 1; i <= searchEnd; i++) {
     const bar = candles[i]
     const reversedBack = direction === 'bullish' ? bar.close < level : bar.close > level
     if (!reversedBack) continue
     const bodyPct = Math.abs(bar.close - bar.open) / bar.open
-    if (bodyPct <= REVERSAL_BODY_MIN_PCT) continue
+    if (bodyPct <= reversalBodyMinPct) continue
     const sinceBreakout = candles.slice(breakoutIndex + 1, i + 1)
     const extreme = direction === 'bullish'
       ? Math.min(...sinceBreakout.map(c => c.low))
@@ -151,7 +151,14 @@ export interface RemoraResult {
 export const detectRemoraSetup = (
   candles: Candle[],
   direction: 'bullish' | 'bearish',
-  vwap: number | null
+  vwap: number | null,
+  // Override for tuning/backtesting only - live callers omit this and get
+  // the original spec-derived default. Found live-data testing 2026-08-11:
+  // the default (0.5% single-5min-candle body) never once fired across 90
+  // real days on SPY/QQQ/IWM - too strict for these three tickers at this
+  // resolution to ever be satisfied, not evidence the underlying "false
+  // breakout, then bounce" thesis is wrong.
+  reversalBodyMinPctOverride?: number
 ): RemoraResult | null => {
   if (candles.length < MIN_BARS_REQUIRED) return null
 
@@ -163,7 +170,7 @@ export const detectRemoraSetup = (
   const breakout = findBreakout(candles, swing.index + 1, swing.price, direction)
   if (!breakout) return null
 
-  const reversal = findReversal(candles, breakout.index, swing.price, direction)
+  const reversal = findReversal(candles, breakout.index, swing.price, direction, reversalBodyMinPctOverride ?? REVERSAL_BODY_MIN_PCT)
   if (!reversal) return null
 
   const bounce = evaluateBounce(candles, reversal.index, swing.price, reversal.price, direction)
