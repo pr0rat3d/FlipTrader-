@@ -93,11 +93,12 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
 // sources say the same thing, so disabled rather than patched further. See
 // options-bot memory for the full TTTF momentum-reset gate test that was
 // tried and rejected before this decision.
-// PBC added 2026-08-11: unlike every other entry in this set, NOT "disabled
-// pending validation" - it's designed as alert-only from day one (trader
-// reviews the push notification and decides manually), so this exclusion is
-// permanent by intent, not a placeholder to reconsider once backtested.
-const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF', 'TTTF', 'PBC'])
+// PBC and REM added 2026-08-11: unlike every other entry in this set, NOT
+// "disabled pending validation" - both are designed as alert-only from day
+// one (trader reviews the push notification and decides manually), so this
+// exclusion is permanent by intent, not a placeholder to reconsider once
+// backtested.
+const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF', 'TTTF', 'PBC', 'REM'])
 
 // DIV trend-day gate, shipped 2026-07-23 after a real incident: 10 straight
 // bullish DIV entries fired into a genuine gap-down-and-continue morning

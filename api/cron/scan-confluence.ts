@@ -17,6 +17,7 @@ import { applyConfidenceModifiers, isPrimeTime } from '../../server/confidenceMo
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, orbBaseConfidence, continuationTargetPrice } from '../../server/orb.js'
 import { getQuote } from '../../server/finnhub.js'
 import { detectPullbackConfluence } from '../../server/pullbackConfluence.js'
+import { detectRemoraSetup } from '../../server/remora.js'
 
 // VIXY (VIX-futures ETF proxy - see confidenceModifiers.ts) via Finnhub, not
 // Twelve Data - a separate quota from the per-minute credit budget the three
@@ -90,6 +91,11 @@ const NOTIFICATION_CONFIDENCE_THRESHOLD = 0.6
 // sub-threshold near-misses aren't logged live at all. Every insert already
 // implies score >= this, so it always notifies too.
 const PBC_MIN_SCORE = 75
+
+// REM (Remora, 2026-08-11): same rare/high-quality-by-design gating as PBC -
+// insert only when score >= this, not "log everything, notify above
+// threshold" like the cross-index confluence types.
+const REM_MIN_SCORE = 75
 
 interface PerSymbolSignal {
   symbol: string
@@ -627,7 +633,69 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, divFired, ivFired, orbFired, pbcFired })
+    // REM (Remora): alert-only, single-symbol contrarian false-breakout/
+    // bounce setup - same independence/permanent-DISABLED_SIGNAL_TYPES
+    // posture as PBC above, see that block's comment for the reasoning.
+    const remFired: string[] = []
+
+    for (const symbol of CONFLUENCE_INDICES) {
+      const symbolSignal = perSymbolSignals.find(s => s.symbol === symbol)
+      if (!symbolSignal) continue
+
+      const remVwap = calculateSessionVWAP(symbolSignal.candles)
+
+      for (const direction of ['bullish', 'bearish'] as const) {
+        const rem = detectRemoraSetup(symbolSignal.candles, direction, remVwap)
+        if (!rem || rem.score < REM_MIN_SCORE) continue
+
+        const entryTime = new Date()
+        const confidence = rem.score / 100
+        const milestones = deriveMilestonePrices(rem.entryPrice, rem.target)
+
+        const { data, error } = await supabase
+          .from('day_trade_alerts')
+          .insert({
+            symbol,
+            ttf_status: 'REM',
+            rsi_divergence: null,
+            macd_curl: direction,
+            indices_triggered: [symbol],
+            entry_price: rem.entryPrice,
+            entry_time: entryTime,
+            target_50ema: rem.target,
+            stop_loss_price: rem.stopLoss,
+            confidence,
+            timestamp: entryTime
+          })
+          .select()
+
+        if (error) throw error
+
+        if (data && data[0]) {
+          await supabase.from('profit_targets').insert({
+            day_trade_alert_id: data[0].id,
+            symbol,
+            entry_price: rem.entryPrice,
+            entry_time: entryTime,
+            target_50ema_price: rem.target,
+            stop_loss_price: rem.stopLoss,
+            milestone_10_price: milestones.milestone10,
+            milestone_20_price: milestones.milestone20,
+            milestone_30_price: milestones.milestone30
+          })
+
+          remFired.push(symbol)
+
+          await sendToTopic(
+            ALERTS_TOPIC,
+            `Remora Entry: ${symbol}`,
+            `${direction === 'bullish' ? 'Bullish' : 'Bearish'} false-breakout bounce off $${rem.resistanceLevel.toFixed(2)}, score ${rem.score}/100 - entry $${rem.entryPrice.toFixed(2)}, stop $${rem.stopLoss.toFixed(2)}`
+          )
+        }
+      }
+    }
+
+    res.status(200).json({ success: true, indicesTriggered: triggeredIndices, divFired, ivFired, orbFired, pbcFired, remFired })
   } catch (error) {
     console.error('Error in scan-confluence:', error)
     res.status(500).json({ error: String(error) })

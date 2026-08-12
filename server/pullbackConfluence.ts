@@ -24,7 +24,7 @@ const FAST_EMA_SLOW_PERIOD = 20
 const SCORE_COMPONENT_POINTS = 25
 const MIN_BARS_REQUIRED = 30
 
-interface SwingExtreme {
+export interface SwingExtreme {
   index: number
   price: number
 }
@@ -33,8 +33,11 @@ interface SwingExtreme {
 // lookback - same peak/trough technique as emaBreakout.ts's
 // findNearestSwingLevels, but purpose-built here for "the single most recent
 // extreme to measure a pullback against" rather than a clustered
-// nearest-level lookup.
-const findRecentSwingExtreme = (candles: Candle[], direction: 'bullish' | 'bearish'): SwingExtreme | null => {
+// nearest-level lookup. Exported (2026-08-11) for reuse by server/remora.ts -
+// its "resistance/support that gets falsely broken" is the same concept as
+// this pullback thesis's own swing extreme, just used as the anchor for a
+// different sequence afterward.
+export const findRecentSwingExtreme = (candles: Candle[], direction: 'bullish' | 'bearish'): SwingExtreme | null => {
   const n = candles.length
   const start = Math.max(FRACTAL_ARM_BARS, n - SWING_LOOKBACK_BARS)
   const end = n - 1 - FRACTAL_ARM_BARS
