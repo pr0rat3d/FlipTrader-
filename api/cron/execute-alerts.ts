@@ -200,22 +200,24 @@ const hasMomentumReset = async (symbol: string, direction: 'bullish' | 'bearish'
   return direction === 'bullish' ? data.some(r => r.macd_histogram <= 0) : data.some(r => r.macd_histogram >= 0)
 }
 
-// DTTF-specific: same mechanism as hasMomentumReset, but checked jointly
-// across SPY+IWM instead of a single symbol - DTTF is exempt from the
-// per-symbol gate above (a real RSI divergence is normally proof enough of a
-// fresh extreme), but that exemption assumed re-entries would show up as
-// same-symbol repeats, which a per-symbol gate could at least see coming.
-// Found live 2026-08-06: DTTF fired bullish SPY/IWM confluence every ~3 min
-// for 18 straight minutes (17:24-17:42 UTC, confidence 0.70-0.85) while SPY
-// sat in a $767.93-768.23 band (0.04%) - dead flat. 7 real entries (2 SPY, 5
-// IWM) resulted, alternating symbols, so no single symbol ever repeated
-// often enough for a per-symbol check to fire even if DTTF weren't already
-// exempt from it - and every one stopped out on 0DTE gamma noise alone, with
-// the underlying never actually moving. Gated the same way IV/ORB/DIV are
-// (see below): after a same-direction SPY-or-IWM position closes today, no
-// new DTTF entry in that direction until a reset is seen on EITHER symbol's
-// histogram - a real pullback in either leg of the pair counts as fresh
-// evidence, matching DTTF's own "the pair moves together" thesis.
+// Used by both DTTF and DIV (see JOINT_RESET_TYPES below) - same mechanism
+// as hasMomentumReset, but checked jointly across multiple symbols instead
+// of one. DTTF is exempt from the per-symbol gate above entirely (a real
+// RSI divergence is normally proof enough of a fresh extreme), but that
+// exemption assumed re-entries would show up as same-symbol repeats, which
+// a per-symbol gate could at least see coming. Found live 2026-08-06: DTTF
+// fired bullish SPY/IWM confluence every ~3 min for 18 straight minutes
+// (17:24-17:42 UTC, confidence 0.70-0.85) while SPY sat in a
+// $767.93-768.23 band (0.04%) - dead flat. 7 real entries (2 SPY, 5 IWM)
+// resulted, alternating symbols, so no single symbol ever repeated often
+// enough for a per-symbol check to fire even if DTTF weren't already
+// exempt from it - and every one stopped out on 0DTE gamma noise alone,
+// with the underlying never actually moving. Gated the same way IV/ORB/DIV
+// are (see hasMomentumReset above): after a same-direction position
+// closes today in any of the jointly-gated symbols, no new entry in that
+// direction until a reset is seen on ANY of their histograms - a real
+// pullback anywhere in the group counts as fresh evidence, matching the
+// "the group moves together" thesis behind index confluence itself.
 const hasMomentumResetJoint = async (symbols: string[], direction: 'bullish' | 'bearish', sinceIso: string): Promise<boolean> => {
   const { data, error } = await supabase
     .from('indicator_snapshots')
@@ -228,19 +230,19 @@ const hasMomentumResetJoint = async (symbols: string[], direction: 'bullish' | '
   if (!data || data.length === 0) return false
   return direction === 'bullish' ? data.some(r => r.macd_histogram <= 0) : data.some(r => r.macd_histogram >= 0)
 }
-const DTTF_JOINT_RESET_SYMBOLS = ['SPY', 'IWM']
-
-// DIV joint SPY+QQQ gate (2026-08-11) - same alternating-symbol evasion
-// DTTF's SPY/IWM gate above targets (2026-08-06), found on DIV/SPY-QQQ
-// specifically instead: 5 DIV alerts fired every ~3 min from 16:03-16:15 UTC,
-// alternating SPY/QQQ. DIV's own per-symbol gate below DID partially work
-// (each fire only got ONE new leg through, not both, since the other symbol
-// was still blocked) - but couldn't stop the alternating pattern itself,
-// since each symbol's OWN histogram kept genuinely crossing zero between
-// fires (real chop, not a stale re-fire slipping past a bug). Layered ON TOP
-// of the existing per-symbol DIV gate, not a replacement - unlike DTTF, DIV
-// keeps both.
-const DIV_JOINT_RESET_SYMBOLS = ['SPY', 'QQQ']
+// 2026-08-12 generalization: originally two separate gates, each scoped to
+// the exact pair from the incident that motivated it (DTTF+SPY/IWM from
+// 08-06, DIV+SPY/QQQ from 08-11 below). Found live 2026-08-12 that this
+// left a real gap: a DTTF/SPY-QQQ whipsaw (a pair NEITHER narrow gate
+// covered - DTTF's was SPY/IWM-only, DIV's SPY/QQQ-only applied to DIV, not
+// DTTF) produced the same 6-entry, 5-stop cluster the narrow fixes were
+// each supposed to prevent (14:51-15:06 UTC, confidence 0.66 the whole
+// time). DTTF and DIV both only ever fire on 2-of-3 index agreement, so ANY
+// pair can whipsaw the same way - checking jointly across all three
+// confluence indices, for both types, closes the gap for good instead of
+// playing whack-a-mole with each new pair combination as it happens live.
+const JOINT_RESET_TYPES = new Set(['DTTF', 'DIV'])
+const JOINT_RESET_SYMBOLS = ['SPY', 'QQQ', 'IWM']
 
 interface OpenLeg {
   id: string
@@ -502,37 +504,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
       }
 
-      // DIV joint SPY+QQQ gate - see DIV_JOINT_RESET_SYMBOLS above for the
-      // 2026-08-11 incident this targets. Only applies when this leg's own
-      // symbol is one of the two DIV is jointly gated on; a DIV triggered by
-      // e.g. QQQ+IWM falls outside this specific fix's scope, same caveat
-      // DTTF's joint gate below already has.
-      if (ttfStatus === 'DIV' && DIV_JOINT_RESET_SYMBOLS.includes(leg.symbol)) {
-        const { data: lastDivJointClosedRows, error: lastDivJointClosedError } = await supabase
-          .from('option_positions')
-          .select('closed_at')
-          .in('underlying_symbol', DIV_JOINT_RESET_SYMBOLS)
-          .eq('direction', direction)
-          .not('closed_at', 'is', null)
-          .order('closed_at', { ascending: false })
-          .limit(1)
-        if (lastDivJointClosedError) throw lastDivJointClosedError
-        const lastDivJointClosedAt = lastDivJointClosedRows?.[0]?.closed_at
-        if (lastDivJointClosedAt && nyDateKey(lastDivJointClosedAt) === today) {
-          const reset = await hasMomentumResetJoint(DIV_JOINT_RESET_SYMBOLS, direction, lastDivJointClosedAt)
-          if (!reset) continue
-        }
-      }
-
-      // DTTF joint SPY+IWM gate - see hasMomentumResetJoint above for the
-      // 2026-08-06 incident this targets. Only applies when this leg's own
-      // symbol is one of the two DTTF is jointly gated on; a DTTF triggered
-      // by e.g. QQQ+IWM falls outside this specific fix's scope.
-      if (ttfStatus === 'DTTF' && DTTF_JOINT_RESET_SYMBOLS.includes(leg.symbol)) {
+      // Joint momentum-reset gate for DTTF and DIV, checked across all
+      // three confluence indices (SPY/QQQ/IWM) - see JOINT_RESET_SYMBOLS
+      // above for why this replaced two pair-specific gates. DIV keeps its
+      // own per-symbol gate above too (layered, not replaced); DTTF has no
+      // per-symbol gate at all, so this is its only protection.
+      if (JOINT_RESET_TYPES.has(ttfStatus ?? '') && JOINT_RESET_SYMBOLS.includes(leg.symbol)) {
         const { data: lastJointClosedRows, error: lastJointClosedError } = await supabase
           .from('option_positions')
           .select('closed_at')
-          .in('underlying_symbol', DTTF_JOINT_RESET_SYMBOLS)
+          .in('underlying_symbol', JOINT_RESET_SYMBOLS)
           .eq('direction', direction)
           .not('closed_at', 'is', null)
           .order('closed_at', { ascending: false })
@@ -540,7 +521,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (lastJointClosedError) throw lastJointClosedError
         const lastJointClosedAt = lastJointClosedRows?.[0]?.closed_at
         if (lastJointClosedAt && nyDateKey(lastJointClosedAt) === today) {
-          const reset = await hasMomentumResetJoint(DTTF_JOINT_RESET_SYMBOLS, direction, lastJointClosedAt)
+          const reset = await hasMomentumResetJoint(JOINT_RESET_SYMBOLS, direction, lastJointClosedAt)
           if (!reset) continue
         }
       }
