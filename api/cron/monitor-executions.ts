@@ -74,12 +74,27 @@ interface Position {
   entry_order_id: string | null
   claimed_at: string
   reconciliation_attempts: number
+  needs_manual_review: boolean
+  review_reason: string | null
   option_position_tiers: Tier[]
 }
 
 const notifyManualReview = async (symbol: string, reason: string) => {
   await sendToTopic(ALERTS_TOPIC, `Options bot: manual review (${symbol})`, reason)
 }
+
+// Many independent diagnostic paths below share these same two columns, and
+// each writes with a plain unconditional update - last write wins. Found
+// live 2026-08-18: the tier-fill ratchet failed and recorded a specific
+// Alpaca error, then the very next poll's stop-health check found the stop
+// still missing, self-healed it, and overwrote the row with its own generic
+// "auto-healed, please verify" message - silently erasing the only record
+// of what the original failure actually was. Preserve whatever was recorded
+// first this episode; later events append rather than clobber.
+const appendReviewReason = (position: Position, note: string): string =>
+  position.needs_manual_review && position.review_reason
+    ? `${position.review_reason} | follow-up: ${note}`
+    : note
 
 const sellAtMarket = async (optionSymbol: string, qty: number, clientOrderId: string): Promise<{ orderId: string | null; failure: string | null }> => {
   try {
@@ -245,7 +260,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           closed++
         } else {
           await supabase.from('option_positions').update({
-            needs_manual_review: true, review_reason: `force-close flatten failed: ${result.failure}`
+            needs_manual_review: true, review_reason: appendReviewReason(position, `force-close flatten failed: ${result.failure}`)
           }).eq('id', position.id)
           await notifyManualReview(position.underlying_symbol, `CRITICAL: 3:45pm force-close failed to flatten - ${result.failure}`)
         }
@@ -284,7 +299,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           await supabase.from('option_positions').update({
             status: stopPct > 0 ? 'closed_hard_stop' : 'closed_stop',
             remaining_contracts: 0, closed_at: now.toISOString(),
-            review_reason: `stop order filled: ${(adverseMove * 100).toFixed(1)}% adverse, broker fill $${fillPrice.toFixed(2)} (threshold ${(stopPct * 100).toFixed(0)}%)`
+            review_reason: appendReviewReason(position, `stop order filled: ${(adverseMove * 100).toFixed(1)}% adverse, broker fill $${fillPrice.toFixed(2)} (threshold ${(stopPct * 100).toFixed(0)}%)`)
           }).eq('id', position.id)
           await notifyManualReview(position.underlying_symbol, `Stop triggered (broker-side) - ${(adverseMove * 100).toFixed(1)}% adverse`)
           closed++
@@ -353,7 +368,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
                 await supabase.from('option_positions').update({
                   status: healStopPct > 0 ? 'closed_hard_stop' : 'closed_stop',
                   remaining_contracts: 0, closed_at: now.toISOString(),
-                  review_reason: `protective stop order ${stopOrder.status} unexpectedly, and price had already breached the stop level by the time this was caught (${(healAdverseMove * 100).toFixed(1)}% adverse, threshold ${(healStopPct * 100).toFixed(0)}%) - flattened at market instead of attempting an invalid stop`
+                  review_reason: appendReviewReason(position, `protective stop order ${stopOrder.status} unexpectedly, and price had already breached the stop level by the time this was caught (${(healAdverseMove * 100).toFixed(1)}% adverse, threshold ${(healStopPct * 100).toFixed(0)}%) - flattened at market instead of attempting an invalid stop`)
                 }).eq('id', position.id)
                 await notifyManualReview(position.underlying_symbol, `Protective stop was ${stopOrder.status} unexpectedly and price already breached the stop level - flattened at market (${(healAdverseMove * 100).toFixed(1)}% adverse)`)
                 closed++
@@ -361,7 +376,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
               } else {
                 await supabase.from('option_positions').update({
                   needs_manual_review: true,
-                  review_reason: `protective stop order ${stopOrder.status} unexpectedly, price already breached the stop level, AND the market flatten also failed - position unprotected: ${result.failure}`
+                  review_reason: appendReviewReason(position, `protective stop order ${stopOrder.status} unexpectedly, price already breached the stop level, AND the market flatten also failed - position unprotected: ${result.failure}`)
                 }).eq('id', position.id)
                 await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status}, price already breached the stop level, AND market flatten failed - ${result.failure}`)
               }
@@ -374,13 +389,13 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
                 position.stop_order_id = healedStop.id
                 await supabase.from('option_positions').update({
                   stop_order_id: healedStop.id, needs_manual_review: true,
-                  review_reason: `protective stop order ${stopOrder.status} unexpectedly - auto-healed with a fresh stop at $${healStopPrice.toFixed(2)}, please verify`
+                  review_reason: appendReviewReason(position, `protective stop order ${stopOrder.status} unexpectedly - auto-healed with a fresh stop at $${healStopPrice.toFixed(2)}, please verify`)
                 }).eq('id', position.id)
                 await notifyManualReview(position.underlying_symbol, `Protective stop was ${stopOrder.status} unexpectedly - auto-healed with a new stop at $${healStopPrice.toFixed(2)}, please verify`)
               } catch (e) {
                 await supabase.from('option_positions').update({
                   needs_manual_review: true,
-                  review_reason: `protective stop order ${stopOrder.status} unexpectedly, AND the auto-heal placement also failed - position unprotected: ${describeAlpacaError(e)}`
+                  review_reason: appendReviewReason(position, `protective stop order ${stopOrder.status} unexpectedly, AND the auto-heal placement also failed - position unprotected: ${describeAlpacaError(e)}`)
                 }).eq('id', position.id)
                 await notifyManualReview(position.underlying_symbol, `CRITICAL: protective stop is ${stopOrder.status} AND auto-heal failed - position unprotected - ${describeAlpacaError(e)}`)
               }
@@ -398,13 +413,13 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
             await supabase.from('option_positions').update({
               status: stopPct > 0 ? 'closed_hard_stop' : 'closed_stop',
               remaining_contracts: 0, closed_at: now.toISOString(),
-              review_reason: `stop triggered (fallback, no resting order): ${(adverseMove * 100).toFixed(1)}% adverse on live quote (threshold ${(stopPct * 100).toFixed(0)}%)`
+              review_reason: appendReviewReason(position, `stop triggered (fallback, no resting order): ${(adverseMove * 100).toFixed(1)}% adverse on live quote (threshold ${(stopPct * 100).toFixed(0)}%)`)
             }).eq('id', position.id)
             await notifyManualReview(position.underlying_symbol, `Stop triggered (fallback) - flattened at market (${(adverseMove * 100).toFixed(1)}% adverse)`)
             closed++
           } else {
             await supabase.from('option_positions').update({
-              needs_manual_review: true, review_reason: `fallback stop flatten failed: ${result.failure}`
+              needs_manual_review: true, review_reason: appendReviewReason(position, `fallback stop flatten failed: ${result.failure}`)
             }).eq('id', position.id)
             await notifyManualReview(position.underlying_symbol, `CRITICAL: fallback stop triggered but flatten failed - ${result.failure}`)
           }
@@ -655,13 +670,13 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
 
         await supabase.from('option_positions').update({
           remaining_contracts: remaining, stop_pct: BREAKEVEN_PROTECTION_STOP_PCT, stop_order_id: newStopOrderId,
-          ...(ratchetFailure ? { needs_manual_review: true, review_reason: `stop replace after tier fill failed - position unprotected: ${ratchetFailure}` } : {})
+          ...(ratchetFailure ? { needs_manual_review: true, review_reason: appendReviewReason(position, `stop replace after tier fill failed - position unprotected: ${ratchetFailure}`) } : {})
         }).eq('id', position.id)
       }
     } catch (positionError) {
       console.error(`Error managing option position ${position.id} (${position.underlying_symbol}):`, positionError)
       await supabase.from('option_positions').update({
-        needs_manual_review: true, review_reason: describeAlpacaError(positionError)
+        needs_manual_review: true, review_reason: appendReviewReason(position, describeAlpacaError(positionError))
       }).eq('id', position.id)
     }
   }
