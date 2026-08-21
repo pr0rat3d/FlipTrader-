@@ -10,6 +10,14 @@ import { recordSnapshot } from '../../server/snapshot.js'
 import { pickBatch } from '../../server/batching.js'
 import { getSwingUniverse } from '../../server/swingUniverse.js'
 import { getDailyLevels } from '../../server/supportResistance.js'
+import { evaluateSwingOpportunity } from '../../server/swingOptionSelection.js'
+
+// Spec filter, applied only once a symbol's IV-rank has enough history to be
+// meaningful (see MIN_IV_HISTORY_FOR_RANK in swingOptionSelection.ts) - null
+// (cold start) always passes, matching the pre-options-Greeks live behavior
+// rather than going silent for the ~20 trading days history takes to build.
+const CALL_MAX_IV_RANK = 40
+const PUT_MIN_IV_RANK = 60
 
 // Twelve Data's free tier allows 8 credits/minute account-wide, shared with
 // scan-confluence.ts (3 credits, but that one now runs every single minute -
@@ -88,13 +96,39 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       const rsiValues = calculateRSI(closes, 14)
       const currentRSI = rsiValues[rsiValues.length - 1]
+      const spotPrice = closes[closes.length - 1]
 
-      if (currentRSI < 30) {
+      const direction: 'bullish' | 'bearish' | null =
+        currentRSI < 30 ? 'bullish' : currentRSI > 70 ? 'bearish' : null
+
+      if (direction) {
         const sector = sectorBySymbol[symbol] || 'other'
+        const signalType = direction === 'bullish' ? 'CALL' : 'PUT'
+
+        // Options/Greeks/IV-rank lookup only runs for a symbol that's actually
+        // crossed an RSI threshold - same cost shape as the original
+        // RSI-only version, just with a real Alpaca options lookup added on
+        // top for the (much smaller) set of symbols that qualify.
+        const opportunity = await evaluateSwingOpportunity(symbol, direction, spotPrice, currentRSI)
+        const ivRankValue = opportunity?.ivRank?.rank ?? null
+        // Cold start (ivRankValue === null, not enough IV history yet) always
+        // passes - proceed on RSI alone rather than go silent for ~20 trading
+        // days per symbol. Once a rank exists, apply the spec's real filter.
+        const ivGatePass = ivRankValue === null
+          || (signalType === 'CALL' ? ivRankValue < CALL_MAX_IV_RANK : ivRankValue > PUT_MIN_IV_RANK)
+
+        if (!ivGatePass) {
+          // RSI condition holds but premiums aren't cheap/rich enough yet per
+          // a now-mature IV rank - same treatment as "not oversold/overbought
+          // at all" below, rather than firing a lower-quality alert.
+          await supabase.from('swing_trade_alerts').delete().eq('symbol', symbol)
+          continue
+        }
 
         // One row per symbol, kept up to date in place - a symbol that stays
-        // oversold across many consecutive runs should update its existing card's
-        // timestamp/RSI, not stack up a new duplicate card every run.
+        // oversold/overbought across many consecutive runs should update its
+        // existing card's timestamp/RSI/options data, not stack up a new
+        // duplicate card every run.
         const { data: existing } = await supabase
           .from('swing_trade_alerts')
           .select('id')
@@ -104,25 +138,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const { error } = await supabase
           .from('swing_trade_alerts')
           .upsert(
-            { symbol, rsi_value: currentRSI, sector, oversold_date: new Date() },
+            {
+              symbol, rsi_value: currentRSI, sector, oversold_date: new Date(),
+              signal_type: signalType,
+              option_symbol: opportunity?.strike.optionSymbol ?? null,
+              expiration_date: opportunity?.strike.expirationDate ?? null,
+              recommended_strike: opportunity?.strike.strikePrice ?? null,
+              delta: opportunity?.strike.delta ?? null,
+              gamma: opportunity?.strike.gamma ?? null,
+              theta: opportunity?.strike.theta ?? null,
+              vega: opportunity?.strike.vega ?? null,
+              iv_current: opportunity?.strike.iv ?? null,
+              iv_rank: ivRankValue,
+              entry_rationale: opportunity?.rationale ?? null
+            },
             { onConflict: 'symbol' }
           )
 
         if (!error) {
-          oversoldAlerts.push({ symbol, rsi: currentRSI, sector })
-          // Only notify on a genuinely new oversold occurrence, not every re-fire
-          // while the symbol remains oversold across subsequent runs.
+          oversoldAlerts.push({ symbol, rsi: currentRSI, sector, signalType })
+          // Only notify on a genuinely new occurrence, not every re-fire
+          // while the symbol remains oversold/overbought across subsequent runs.
           if (!existing) {
+            const strikeDetail = opportunity
+              ? `, $${opportunity.strike.strikePrice}${signalType === 'CALL' ? 'C' : 'P'} Δ${opportunity.strike.delta.toFixed(2)}${ivRankValue !== null ? `, IV rank ${ivRankValue.toFixed(0)}%` : ''}`
+              : ''
             await sendToTopic(
               ALERTS_TOPIC,
               `Swing Alert: ${symbol}`,
-              `Oversold at RSI ${currentRSI.toFixed(1)} (${sector})`
+              `${direction === 'bullish' ? 'Oversold' : 'Overbought'} at RSI ${currentRSI.toFixed(1)} (${sector})${strikeDetail}`
             )
+          }
+          // Record today's real IV reading (if the options lookup succeeded)
+          // for future IV-rank history - a separate write from the earlier
+          // recordSnapshot call above since IV is only known after this
+          // symbol was confirmed oversold/overbought.
+          if (opportunity) {
+            await recordSnapshot(symbol, 'swing', candles, { impliedVol: opportunity.strike.iv })
           }
         }
       } else {
-        // No longer oversold - fall off the list rather than sit there showing a
-        // stale RSI from whenever it last triggered.
+        // No longer oversold or overbought - fall off the list rather than sit
+        // there showing a stale RSI from whenever it last triggered.
         await supabase.from('swing_trade_alerts').delete().eq('symbol', symbol)
       }
     }

@@ -73,6 +73,17 @@ export interface SwingAlert {
   sector: string;
   oversold_date: string;
   created_at: string;
+  signal_type?: 'CALL' | 'PUT';
+  option_symbol?: string | null;
+  expiration_date?: string | null;
+  recommended_strike?: number | null;
+  delta?: number | null;
+  gamma?: number | null;
+  theta?: number | null;
+  vega?: number | null;
+  iv_current?: number | null;
+  iv_rank?: number | null;
+  entry_rationale?: string | null;
 }
 
 export interface UserPreferences {

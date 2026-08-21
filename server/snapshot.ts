@@ -8,6 +8,7 @@ export type SnapshotCategory = 'day_trade' | 'swing'
 
 export interface SnapshotBarExtras {
   vwap?: number | null
+  impliedVol?: number | null
 }
 
 export const recordSnapshot = async (
@@ -19,7 +20,7 @@ export const recordSnapshot = async (
   const closes = candles.map(c => c.close)
   if (closes.length < 26) return
 
-  const { vwap = null } = extras
+  const { vwap = null, impliedVol = null } = extras
   const highs = candles.map(c => c.high)
   const lows = candles.map(c => c.low)
   const latest = candles[candles.length - 1]

@@ -286,6 +286,75 @@ export const findOptionContract = async (
   }
 }
 
+// Distinct listed expiration dates for an underlying within a window - used
+// by the swing scanner's pickExpiration to find the nearest real listed
+// expiry to a target (e.g. ~2-3 weeks out), since not every calendar date
+// has a listed contract. Deliberately no strike filter - just enumerating
+// which expirations exist at all.
+export const getAvailableExpirations = async (
+  underlyingSymbol: string,
+  contractType: 'call' | 'put',
+  gte: string,
+  lte: string
+): Promise<string[] | null> => {
+  try {
+    const response = await http.get(`${tradingBaseUrl()}/v2/options/contracts`, {
+      headers: tradingHeaders(),
+      params: {
+        underlying_symbols: underlyingSymbol,
+        expiration_date_gte: gte,
+        expiration_date_lte: lte,
+        type: contractType,
+        status: 'active'
+      }
+    })
+    const contracts: any[] = response.data?.option_contracts ?? []
+    if (contracts.length === 0) return null
+    return Array.from(new Set<string>(contracts.map(c => c.expiration_date))).sort()
+  } catch (error) {
+    console.error(`Error fetching expirations for ${underlyingSymbol}:`, error)
+    return null
+  }
+}
+
+// Several contracts spanning a range around the underlying's price, for a
+// FIXED expiration - unlike findOptionContract above (single closest
+// strike), this lets the swing scanner evaluate multiple strikes' real
+// Greeks and pick whichever actually lands in the target delta band, rather
+// than assuming the nearest-to-spot strike is the right one. Percentage-
+// based range (not a flat few dollars like findOptionContract's 0DTE case)
+// since this watchlist spans very different price levels (SPY ~$700+ vs a
+// $30 stock) and a multi-week delta-0.30 strike can be meaningfully further
+// from spot than a same-day one.
+export const listOptionContractsNear = async (
+  underlyingSymbol: string,
+  expirationDate: string,
+  centerStrike: number,
+  contractType: 'call' | 'put'
+): Promise<OptionContract[]> => {
+  const range = Math.max(3, centerStrike * 0.15)
+  try {
+    const response = await http.get(`${tradingBaseUrl()}/v2/options/contracts`, {
+      headers: tradingHeaders(),
+      params: {
+        underlying_symbols: underlyingSymbol,
+        expiration_date: expirationDate,
+        strike_price_gte: (centerStrike - range).toFixed(2),
+        strike_price_lte: (centerStrike + range).toFixed(2),
+        type: contractType,
+        status: 'active'
+      }
+    })
+    const contracts: any[] = response.data?.option_contracts ?? []
+    return contracts
+      .map(c => ({ symbol: c.symbol, strikePrice: parseFloat(c.strike_price) }))
+      .sort((a, b) => a.strikePrice - b.strikePrice)
+  } catch (error) {
+    console.error(`Error listing option contracts for ${underlyingSymbol} ${expirationDate}:`, error)
+    return []
+  }
+}
+
 export interface OptionQuote {
   bid: number
   ask: number
