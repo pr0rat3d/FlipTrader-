@@ -1,10 +1,8 @@
 import React, { useMemo, useState } from 'react'
 import { useAlerts } from '../hooks/useAlerts'
-import { useSwingAlerts } from '../hooks/useSwingAlerts'
 import { useLivePrices } from '../hooks/useLivePrices'
 import { useLegLiveStatus } from '../hooks/useLegLiveStatus'
 import { AlertCard } from './AlertCard'
-import { SwingAlertCard } from './SwingAlertCard'
 import { Alert } from '../types'
 
 const DAY_TRADE_INDICES = ['SPY', 'QQQ', 'IWM']
@@ -84,7 +82,6 @@ const groupAlerts = (alerts: Alert[], isLive: (alertId: string) => boolean): Ale
 
 export const Dashboard: React.FC = () => {
   const { alerts, loading } = useAlerts()
-  const { alerts: swingAlerts, loading: swingLoading } = useSwingAlerts()
   const [sortBy, setSortBy] = useState<'recent' | 'confidence'>('recent')
   const livePrices = useLivePrices(DAY_TRADE_INDICES)
   const { isLive } = useLegLiveStatus()
@@ -129,7 +126,7 @@ export const Dashboard: React.FC = () => {
         <p className="text-gray-400">No day trade alerts yet today. Waiting for signals...</p>
       )}
 
-      <div className="space-y-2 mb-6">
+      <div className="space-y-2">
         {sortedGroups.map(group => (
           <AlertCard
             key={group.key}
@@ -138,20 +135,6 @@ export const Dashboard: React.FC = () => {
             occurrenceCount={group.count}
             firstSeenAt={group.firstSeenAt}
           />
-        ))}
-      </div>
-
-      <h2 className="text-2xl font-bold text-white mb-4">Swing Alerts</h2>
-
-      {swingLoading && <p className="text-gray-400">Loading swing alerts...</p>}
-
-      {swingAlerts.length === 0 && !swingLoading && (
-        <p className="text-gray-400">No swing alerts yet. Waiting for oversold conditions...</p>
-      )}
-
-      <div className="space-y-2">
-        {swingAlerts.map(alert => (
-          <SwingAlertCard key={alert.id} alert={alert} />
         ))}
       </div>
     </div>
