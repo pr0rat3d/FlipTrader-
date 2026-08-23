@@ -369,6 +369,8 @@ const parseArgs = () => {
   const cciMinScore = get('--cci-min-score') // e.g. "50" - enables the CCI prototype signal (CCI(20) reset off +-100, server/cciReset.ts), tradeable here to read win-rate/entry-count. 50 = raw reset trigger only, 75 = +one of deep-washout/daily-trend/volume-spike, 100/125 = more of those stacked. Undefined = signal doesn't exist for this run at all.
   const cciTargetRMultipleArg = get('--cci-target-r-multiple') // e.g. "1" (default in server/cciReset.ts) or "2" - overrides the quick-scalp 1R target the friend's "get in, get out" thesis implies, for sweeping against this app's usual 2R.
   const cciRequireVolumeConfirmationArg = args.includes('--cci-require-volume-confirmation') // 2026-08-23 - hard gate: reset bar's volume must be >=1.5x its trailing 20-bar average, isolated from the score threshold so it can be A/B tested on its own (same reasoning as --tttf-momentum-reset-gate). Off by default - volumePoints/volumeRatio are still computed and visible in the score either way.
+  const strikeOtmOffsetArg = get('--strike-otm-offset') // e.g. "1" - dollars OUT of the money from the live ATM strike, ALL types. 2026-08-20: real incident where 3 same-second ATM 0DTE entries (SPY/QQQ/IWM DIV) all hard-stopped in 2-3min on <0.15% underlying moves - ATM 0DTE gamma amplifying chop, not a bug. Tests whether trading leverage for less gamma exposure nets out better.
+  const divStrikeOtmOffsetArg = get('--div-strike-otm-offset') // e.g. "1" - same idea, scoped to DIV only (the type actually involved in the 08-20 incident) - everything else keeps the live ATM strike.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -412,12 +414,14 @@ const parseArgs = () => {
     cciMinScore: cciMinScore ? parseFloat(cciMinScore) : undefined,
     cciTargetRMultiple: cciTargetRMultipleArg ? parseFloat(cciTargetRMultipleArg) : undefined,
     cciRequireVolumeConfirmation: cciRequireVolumeConfirmationArg,
+    strikeOtmOffset: strikeOtmOffsetArg ? parseFloat(strikeOtmOffsetArg) : undefined,
+    divStrikeOtmOffset: divStrikeOtmOffsetArg ? parseFloat(divStrikeOtmOffsetArg) : undefined,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation, strikeOtmOffset, divStrikeOtmOffset } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -439,6 +443,8 @@ const main = async () => {
   console.log(`REM prototype (Remora false-breakout/bounce, alert-only in real life): ${remoraMinScore !== undefined ? `ON, score >= ${remoraMinScore}` : 'off (does not exist unless enabled)'}`)
   console.log(`CCI prototype (CCI(20) +-100 reset, quick-scalp): ${cciMinScore !== undefined ? `ON, score >= ${cciMinScore}, target=${cciTargetRMultiple ?? 1}R, volume-confirmation=${cciRequireVolumeConfirmation ? 'required' : 'off'}` : 'off (does not exist unless enabled)'}`)
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
+  console.log(`Strike OTM offset (all types): ${strikeOtmOffset !== undefined ? `$${strikeOtmOffset} OTM` : 'off (live default: ATM)'}`)
+  console.log(`Strike OTM offset (DIV only): ${divStrikeOtmOffset !== undefined ? `$${divStrikeOtmOffset} OTM` : 'off (live default: ATM)'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
   console.log(`Daily loss circuit breaker: ${dailyLossLimitPct !== undefined ? `ON (${(dailyLossLimitPct * 100).toFixed(0)}% of day's starting equity)` : 'OFF'}`)
@@ -761,9 +767,10 @@ const main = async () => {
     const volWindow = intradayCandles[symbol].slice(Math.max(0, globalIndex - VOL_WINDOW_BARS + 1), globalIndex + 1).map(c => c.close)
     const buyingPower = simEquity * MARGIN_MULTIPLIER - committedCapital
     const riskPctMultiplier = rebalanceCapitalPriority ? (RISK_PCT_MULTIPLIER_BY_TYPE[ttfStatus] ?? DEFAULT_RISK_PCT_MULTIPLIER) : 1.0
+    const effectiveStrikeOtmOffset = (ttfStatus === 'DIV' && divStrikeOtmOffset !== undefined) ? divStrikeOtmOffset : (strikeOtmOffset ?? 0)
     const priced = priceEntry(direction, entryPrice, target50EMA, t, volWindow, {
       equity: simEquity, buyingPower, riskPct: SIM_RISK_PCT * riskPctMultiplier, minEquity: SIM_MIN_EQUITY, maxEquity: SIM_MAX_EQUITY
-    })
+    }, effectiveStrikeOtmOffset)
     if (!priced.ok) return skip(priced.reason)
 
     const entryCost = priced.contracts * priced.entryPremium * 100
@@ -1340,7 +1347,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}${strikeOtmOffset !== undefined ? `_strikeotm${strikeOtmOffset}` : ''}${divStrikeOtmOffset !== undefined ? `_divstrikeotm${divStrikeOtmOffset}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`

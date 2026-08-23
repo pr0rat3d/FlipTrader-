@@ -58,11 +58,23 @@ export const priceEntry = (
   targetUnderlyingPrice: number,
   entryTimeIso: string,
   trailingCloses: number[],
-  sizing: { equity: number; buyingPower: number; riskPct: number; minEquity: number; maxEquity: number }
+  sizing: { equity: number; buyingPower: number; riskPct: number; minEquity: number; maxEquity: number },
+  // Dollars OUT of the money from the live ATM strike (suggestOptionStrike's
+  // nearest-dollar rounding) - 0 (default) matches live exactly. Added
+  // 2026-08-20 after a real incident: 3 same-second ATM 0DTE entries
+  // (SPY/QQQ/IWM DIV, all struck within ~$0.65 of the underlying) all hit
+  // their hard stop within 2-3 minutes while the underlying itself moved
+  // under 0.15% - ATM 0DTE gamma amplifying near-noise-level chop into a
+  // 12-17% premium swing, not a signal or execution bug (see
+  // project_fliptrader_options_bot memory, 2026-08-20 entry). Going OTM
+  // trades leverage/theta-decay-speed for materially less gamma exposure per
+  // dollar of underlying movement - this flag tests whether that tradeoff
+  // actually nets out better over a real window, not just intuition.
+  strikeOtmOffset: number = 0
 ): EntryPriceOutcome => {
   const suggestion = suggestOptionStrike(direction, entryUnderlyingPrice, targetUnderlyingPrice)
   const contractType: OptionType = direction === 'bullish' ? 'call' : 'put'
-  const strike = suggestion.entryStrike
+  const strike = direction === 'bullish' ? suggestion.entryStrike + strikeOtmOffset : suggestion.entryStrike - strikeOtmOffset
 
   const sigma = Math.max(realizedVolatility(trailingCloses), 0.01) * ZERO_DTE_IV_MARKUP
   const T = minutesToCloseAt(entryTimeIso) / (60 * 24 * 365)
