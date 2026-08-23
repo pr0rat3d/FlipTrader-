@@ -56,6 +56,7 @@ import { detectIVSignal } from '../server/signalDetection.js'
 import { scoreEmaBreakout, EmaBreakoutResult } from '../server/emaBreakout.js'
 import { detectPullbackConfluence } from '../server/pullbackConfluence.js'
 import { detectRemoraSetup } from '../server/remora.js'
+import { detectCciReset } from '../server/cciReset.js'
 import { detectCandlestickPattern } from '../server/candlestickPatterns.js'
 import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, isIntradayVwapAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
@@ -186,6 +187,17 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
 const SIM_STARTING_EQUITY = 2000
 const MARGIN_MULTIPLIER = 2
 const SIM_RISK_PCT = 0.10
+// Phase 1b (2026-08-23): trading the UNDERLYING directly instead of a
+// decaying option contract - same $ risked per trade (SIM_RISK_PCT of
+// SIM_STARTING_EQUITY, matching the options sim's own capital-at-risk
+// convention) but no theta/premium/Black-Scholes model at all, just
+// shares sized so the stop distance costs exactly this many dollars. Flat/
+// non-compounding and ungated (like Phase 1 itself, not portfolio-aware
+// like Phase 2) - built to answer one specific question: is the CCI
+// prototype's -$1,998/90-day options result actually the underlying's
+// price edge, or an artifact of decaying 0DTE-style option premium eating
+// a real (if modest) price-mean-reversion edge.
+const SHARE_MODE_RISK_DOLLARS = SIM_STARTING_EQUITY * SIM_RISK_PCT
 // Was 500, mirroring the live execution_settings.min_account_equity value -
 // found live 2026-07-17 the SAME catch-22 exists at the lower bound: the
 // corrected (unlimited-ceiling) baseline still crossed below $500 on
@@ -354,6 +366,9 @@ const parseArgs = () => {
   const divJointResetGateArg = args.includes('--div-joint-reset-gate') // 2026-08-11 - live incident: DIV fired every ~3min alternating SPY/QQQ (16:03-16:15 UTC), each fire's per-symbol gate let it through since that symbol's OWN histogram kept genuinely resetting - same alternating-symbol shape as DTTF's 08-06 SPY/IWM incident. Tests extending the same joint-symbol reset gate to DIV/SPY-QQQ, layered on top of (not replacing) DIV's existing per-symbol gate.
   const emabMinScore = get('--emab-min-score') // e.g. "70" - enables the EMAB prototype signal (EMA9/21 trend + swing-level breakout + volume + 2:1 R:R, server/emaBreakout.ts), entirely separate from DIV/TTF/ORB/ADXC. Undefined = signal doesn't exist for this run at all.
   const pbcMinScore = get('--pbc-min-score') // e.g. "75" - enables the PBC (Pullback Confluence) prototype signal (5m EMA9/20 + daily-trend + pullback/VWAP-hold + consolidation/MACD/volume bounce, server/pullbackConfluence.ts), alert-only in real life (PBC is in DISABLED_SIGNAL_TYPES) but tradeable here to read win-rate/entry-count. Undefined = signal doesn't exist for this run at all.
+  const cciMinScore = get('--cci-min-score') // e.g. "50" - enables the CCI prototype signal (CCI(20) reset off +-100, server/cciReset.ts), tradeable here to read win-rate/entry-count. 50 = raw reset trigger only, 75 = +one of deep-washout/daily-trend/volume-spike, 100/125 = more of those stacked. Undefined = signal doesn't exist for this run at all.
+  const cciTargetRMultipleArg = get('--cci-target-r-multiple') // e.g. "1" (default in server/cciReset.ts) or "2" - overrides the quick-scalp 1R target the friend's "get in, get out" thesis implies, for sweeping against this app's usual 2R.
+  const cciRequireVolumeConfirmationArg = args.includes('--cci-require-volume-confirmation') // 2026-08-23 - hard gate: reset bar's volume must be >=1.5x its trailing 20-bar average, isolated from the score threshold so it can be A/B tested on its own (same reasoning as --tttf-momentum-reset-gate). Off by default - volumePoints/volumeRatio are still computed and visible in the score either way.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
@@ -394,12 +409,15 @@ const parseArgs = () => {
     divJointResetGate: divJointResetGateArg,
     remoraMinScore: remoraMinScore ? parseFloat(remoraMinScore) : undefined,
     remoraReversalBodyPct: remoraReversalBodyPct ? parseFloat(remoraReversalBodyPct) : undefined,
+    cciMinScore: cciMinScore ? parseFloat(cciMinScore) : undefined,
+    cciTargetRMultiple: cciTargetRMultipleArg ? parseFloat(cciTargetRMultipleArg) : undefined,
+    cciRequireVolumeConfirmation: cciRequireVolumeConfirmationArg,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -419,6 +437,7 @@ const main = async () => {
   console.log(`PBC prototype (pullback confluence, alert-only in real life): ${pbcMinScore !== undefined ? `ON, score >= ${pbcMinScore}` : 'off (does not exist unless enabled)'}`)
   console.log(`DIV joint SPY/QQQ momentum-reset gate: ${divJointResetGate ? 'ON (layered on top of the existing per-symbol DIV gate)' : 'off (live default as of pre-08-11)'}`)
   console.log(`REM prototype (Remora false-breakout/bounce, alert-only in real life): ${remoraMinScore !== undefined ? `ON, score >= ${remoraMinScore}` : 'off (does not exist unless enabled)'}`)
+  console.log(`CCI prototype (CCI(20) +-100 reset, quick-scalp): ${cciMinScore !== undefined ? `ON, score >= ${cciMinScore}, target=${cciTargetRMultiple ?? 1}R, volume-confirmation=${cciRequireVolumeConfirmation ? 'required' : 'off'}` : 'off (does not exist unless enabled)'}`)
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
@@ -472,6 +491,21 @@ const main = async () => {
   // --- Phase 1 state (ungated signal tracking) ---
   const legs: BacktestLeg[] = []
   const openLegsBySymbol: Record<Symbol, BacktestLeg[]> = { SPY: [], QQQ: [], IWM: [] }
+
+  // Phase 1b accumulator (see SHARE_MODE_RISK_DOLLARS above) - fixed-$-risk
+  // share P&L per type, recorded the instant a leg resolves below.
+  const sharePnlByType = new Map<string, { trades: number; wins: number; totalPnl: number }>()
+  const recordShareOutcome = (leg: BacktestLeg, exitPrice: number) => {
+    const riskPerShare = leg.stop_loss_price !== null ? Math.abs(leg.entry_price - leg.stop_loss_price) : 0
+    if (riskPerShare <= 0) return
+    const shares = SHARE_MODE_RISK_DOLLARS / riskPerShare
+    const pnl = (leg.direction === 'bullish' ? exitPrice - leg.entry_price : leg.entry_price - exitPrice) * shares
+    const bucket = sharePnlByType.get(leg.ttfStatus) ?? { trades: 0, wins: 0, totalPnl: 0 }
+    bucket.trades++
+    if (pnl > 0) bucket.wins++
+    bucket.totalPnl += pnl
+    sharePnlByType.set(leg.ttfStatus, bucket)
+  }
   let nextLegId = 1
 
   const makeLeg = (
@@ -793,11 +827,16 @@ const main = async () => {
       openLegsBySymbol[symbol] = openLegsBySymbol[symbol].filter(leg => {
         if (checkExpiry(new Date(leg.entryTimeIso), now)) {
           leg.status = 'expired'
+          recordShareOutcome(leg, close) // mark-to-market at the same-day cutoff, no fill assumption needed
           return false
         }
         const update = applyPriceSample(leg, leg.direction, close, now)
         if (update) Object.assign(leg, update)
-        if (leg.status === 'target_hit' || leg.status === 'stopped_out') return false
+        // Exit price assumed at the level that actually triggered resolution
+        // (limit fill at target, stop fill at stop) - same no-slippage
+        // assumption the rest of this backtest already makes elsewhere.
+        if (leg.status === 'target_hit') { recordShareOutcome(leg, leg.target_50ema_price); return false }
+        if (leg.status === 'stopped_out') { recordShareOutcome(leg, leg.stop_loss_price!); return false }
         return true
       })
     }
@@ -1189,6 +1228,33 @@ const main = async () => {
       }
     }
 
+    // --- 11. CCI (CCI(20) +-100 reset/reversal, prototype 2026-08-23) ---
+    // Doesn't exist at all unless --cci-min-score is passed. Tests a
+    // trading friend's stated thesis (see server/cciReset.ts's header):
+    // CCI crossing back through +-100 as an earlier, higher-frequency
+    // "reset" trigger than waiting for RSI/MACD/double-bottom confluence,
+    // sized as a quick 1R scalp by default rather than this app's usual
+    // 2R continuation hold. Single-symbol setup, same independence as
+    // PBC/REM above.
+    if (cciMinScore !== undefined) {
+      for (const symbol of SYMBOLS) {
+        const symbolSignal = perSymbolSignals.find(s => s.symbol === symbol)
+        if (!symbolSignal) continue
+
+        const dailyLevels = dailyLevelsAsOf(dailyCandles[symbol], dailyAsOf(symbol))
+
+        for (const direction of ['bullish', 'bearish'] as const) {
+          const cci = detectCciReset(symbolSignal.window, direction, dailyLevels?.dailyEma50 ?? null, dailyLevels?.dailyEma200 ?? null, cciTargetRMultiple ?? 1, cciRequireVolumeConfirmation)
+          if (!cci || cci.score < cciMinScore) continue
+
+          const leg = makeLeg('CCI', symbol, direction, cci.score / 100, now, cci.entryPrice, cci.target, symbolSignal.atr, cci.stopLoss)
+          legs.push(leg)
+          openLegsBySymbol[symbol].push(leg)
+          attemptGatedEntry('CCI', symbol, direction, cci.score / 100, now, cci.entryPrice, cci.target, symbolSignal.globalIndex)
+        }
+      }
+    }
+
     for (const symbol of SYMBOLS) {
       const gi = indexByTime[symbol].get(t)
       if (gi !== undefined) lastCloseBySymbol[symbol] = intradayCandles[symbol][gi].close
@@ -1227,6 +1293,17 @@ const main = async () => {
   }
   console.log(rows.join('\n'))
 
+  // --- Phase 1b: ungated, fixed-$-risk SHARE P&L (no options decay) ---
+  console.log(`\n--- Phase 1b: same legs traded as shares instead of options (flat $${SHARE_MODE_RISK_DOLLARS} risk/trade, no theta/premium model) ---`)
+  const shareRows: string[] = []
+  shareRows.push('Type     Trades  TotalPnL     AvgPnL/trade  WinRate($)')
+  for (const [type, bucket] of [...sharePnlByType.entries()].sort((a, b) => b[1].trades - a[1].trades)) {
+    const avgPnl = bucket.trades > 0 ? bucket.totalPnl / bucket.trades : 0
+    const winRate = bucket.trades > 0 ? ((bucket.wins / bucket.trades) * 100).toFixed(1) + '%' : '—'
+    shareRows.push(`${type.padEnd(8)} ${String(bucket.trades).padEnd(7)} $${bucket.totalPnl.toFixed(0).padEnd(11)} $${avgPnl.toFixed(0).padEnd(12)} ${winRate}`)
+  }
+  console.log(shareRows.join('\n'))
+
   // --- Phase 2: gated, portfolio-aware execution table ---
   console.log('\n--- Phase 2: gated execution against a shared simulated account (modeled premiums) ---')
   const byTypeExecuted = new Map<string, SimPosition[]>()
@@ -1263,7 +1340,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`

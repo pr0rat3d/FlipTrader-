@@ -1,4 +1,4 @@
-import { RSI, MACD, ATR, ADX } from 'technicalindicators'
+import { RSI, MACD, ATR, ADX, CCI } from 'technicalindicators'
 
 export const calculateRSI = (closes: number[], period: number = 14): number[] => {
   return RSI.calculate({ values: closes, period })
@@ -25,6 +25,14 @@ export const calculateATR = (highs: number[], lows: number[], closes: number[], 
 // checks like the daily-EMA trend modifier.
 export const calculateADX = (highs: number[], lows: number[], closes: number[], period: number = 14) => {
   return ADX.calculate({ high: highs, low: lows, close: closes, period })
+}
+
+// Unbounded (unlike RSI's 0-100), so a fixed +-100 threshold behaves very
+// differently across volatility regimes - it can sit beyond +-100 for an
+// extended run in a real trend, not just a brief touch. Used (2026-08-23,
+// prototype) for the CCI reset/reversal thesis - see server/cciReset.ts.
+export const calculateCCI = (highs: number[], lows: number[], closes: number[], period: number = 20): number[] => {
+  return CCI.calculate({ high: highs, low: lows, close: closes, period })
 }
 
 export const calculateEMA = (closes: number[], period: number): number => {
