@@ -84,6 +84,11 @@ export interface SwingAlert {
   iv_current?: number | null;
   iv_rank?: number | null;
   entry_rationale?: string | null;
+  bid_price?: number | null;
+  ask_price?: number | null;
+  ideal_entry_price?: number | null;
+  open_interest?: number | null;
+  liquidity_tier?: 'tight' | 'moderate' | 'wide' | null;
 }
 
 export interface UserPreferences {

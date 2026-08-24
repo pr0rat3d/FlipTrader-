@@ -88,6 +88,8 @@ export const greeksAt = (spot: number, strike: number, T: number, r: number, sig
 export interface ContractGreeksResult extends Greeks {
   iv: number
   midPrice: number
+  bid: number
+  ask: number
 }
 
 // Swappable provider interface - the only implementation today wraps a real
@@ -116,6 +118,6 @@ export const makeInHouseBlackScholesProvider = (
     if (iv === null) return null
 
     const greeks = greeksAt(spot, strike, timeToExpiryYears, RISK_FREE_RATE, iv, type)
-    return { ...greeks, iv, midPrice }
+    return { ...greeks, iv, midPrice, bid: quote.bid, ask: quote.ask }
   }
 })

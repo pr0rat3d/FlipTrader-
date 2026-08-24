@@ -243,6 +243,12 @@ export const getBars5Min = async (symbol: string, lookbackBars: number = 300): P
 export interface OptionContract {
   symbol: string
   strikePrice: number
+  // Only populated by listOptionContractsNear (the swing scanner's path) -
+  // findOptionContract (0DTE day-trade path) doesn't need it, since that
+  // path always trades near-ATM SPY/QQQ/IWM contracts which are liquid by
+  // construction. Alpaca returns this as a string, EOD-updated (see
+  // open_interest_date in the raw response) - not a live/intraday figure.
+  openInterest: number | null
 }
 
 // Widens the strike search a few dollars around the desired strike rather than
@@ -279,7 +285,7 @@ export const findOptionContract = async (
       }
     }
 
-    return { symbol: closest.symbol, strikePrice: parseFloat(closest.strike_price) }
+    return { symbol: closest.symbol, strikePrice: parseFloat(closest.strike_price), openInterest: null }
   } catch (error) {
     console.error(`Error finding option contract for ${underlyingSymbol} ${expirationDate} ${desiredStrike}${contractType}:`, error)
     return null
@@ -347,7 +353,11 @@ export const listOptionContractsNear = async (
     })
     const contracts: any[] = response.data?.option_contracts ?? []
     return contracts
-      .map(c => ({ symbol: c.symbol, strikePrice: parseFloat(c.strike_price) }))
+      .map(c => ({
+        symbol: c.symbol,
+        strikePrice: parseFloat(c.strike_price),
+        openInterest: c.open_interest != null ? parseInt(c.open_interest, 10) : null
+      }))
       .sort((a, b) => a.strikePrice - b.strikePrice)
   } catch (error) {
     console.error(`Error listing option contracts for ${underlyingSymbol} ${expirationDate}:`, error)

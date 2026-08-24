@@ -49,6 +49,59 @@ export const pickExpirationForSymbol = async (
   return nearestExpirationInWindow(underlyingSymbol, contractType, today, FALLBACK_WINDOW_DAYS)
 }
 
+// How close to the bid a passive limit order can realistically expect to
+// fill, based on how liquid the contract actually is - not a guess, this
+// reflects how market makers behave differently in the two regimes. In a
+// tight/deep market (real two-sided flow, narrow spread) the quoted bid is
+// close to fair value, so a passive order sitting near it has a real shot
+// at filling. In a wide/thin market the quoted bid is usually a lone market
+// maker's defensive low-ball, not a realistic transaction price - a purely
+// passive order at the raw bid on an illiquid single-stock contract often
+// just never fills, so the REALISTIC best price shifts toward the mid.
+// 0 = right at the bid, 0.5 = the mid; nothing here ever prices above mid,
+// since "best price possible" means never suggesting the payup-to-ask side.
+const ENTRY_FRACTION_TIGHT = 0.15
+const ENTRY_FRACTION_MODERATE = 0.30
+const ENTRY_FRACTION_WIDE = 0.50
+
+const OI_DEEP_THRESHOLD = 500 // real two-sided interest, not just a listed strike nobody trades
+const OI_THIN_THRESHOLD = 100
+const SPREAD_TIGHT_PCT = 0.05 // spread as a fraction of mid price
+const SPREAD_WIDE_PCT = 0.15
+
+export type LiquidityTier = 'tight' | 'moderate' | 'wide'
+
+// Worse-of open-interest and spread-width, not an average - either signal
+// alone being bad (a deep-OI strike nobody's currently quoting tight, or a
+// tight spread on a strike with near-zero open interest, e.g. freshly
+// listed) means a passive bid-side order isn't realistic, regardless of how
+// good the OTHER signal looks.
+export const classifyLiquidity = (bid: number, ask: number, openInterest: number | null): LiquidityTier => {
+  const mid = (bid + ask) / 2
+  const spreadPct = mid > 0 ? (ask - bid) / mid : 1
+
+  const oiTier: LiquidityTier = openInterest === null ? 'moderate'
+    : openInterest >= OI_DEEP_THRESHOLD ? 'tight'
+    : openInterest >= OI_THIN_THRESHOLD ? 'moderate'
+    : 'wide'
+  const spreadTier: LiquidityTier = spreadPct <= SPREAD_TIGHT_PCT ? 'tight'
+    : spreadPct <= SPREAD_WIDE_PCT ? 'moderate'
+    : 'wide'
+
+  const rank: Record<LiquidityTier, number> = { tight: 0, moderate: 1, wide: 2 }
+  return rank[oiTier] >= rank[spreadTier] ? oiTier : spreadTier
+}
+
+// The realistic best (lowest, for a long call/put) price given the metrics -
+// see classifyLiquidity's header comment for why this isn't just "always
+// bid" or "always mid." Rounded to the cent, same precision the raw
+// bid/ask already carry.
+export const computeIdealEntryPrice = (bid: number, ask: number, openInterest: number | null): number => {
+  const tier = classifyLiquidity(bid, ask, openInterest)
+  const fraction = tier === 'tight' ? ENTRY_FRACTION_TIGHT : tier === 'moderate' ? ENTRY_FRACTION_MODERATE : ENTRY_FRACTION_WIDE
+  return Math.round((bid + fraction * (ask - bid)) * 100) / 100
+}
+
 export interface SwingStrikeSelection {
   optionSymbol: string
   strikePrice: number
@@ -59,6 +112,12 @@ export interface SwingStrikeSelection {
   vega: number
   iv: number
   inBand: boolean
+  bid: number
+  ask: number
+  midPrice: number
+  openInterest: number | null
+  idealEntryPrice: number
+  liquidityTier: LiquidityTier
 }
 
 // Evaluates every candidate contract's REAL delta (via a real quote + the
@@ -84,7 +143,11 @@ export const selectSwingStrike = async (
     evaluated.push({
       optionSymbol: contract.symbol, strikePrice: contract.strikePrice, expirationDate,
       delta: result.delta, gamma: result.gamma, theta: result.theta, vega: result.vega, iv: result.iv,
-      inBand: Math.abs(result.delta) >= DELTA_BAND.min && Math.abs(result.delta) <= DELTA_BAND.max
+      inBand: Math.abs(result.delta) >= DELTA_BAND.min && Math.abs(result.delta) <= DELTA_BAND.max,
+      bid: result.bid, ask: result.ask, midPrice: result.midPrice,
+      openInterest: contract.openInterest,
+      idealEntryPrice: computeIdealEntryPrice(result.bid, result.ask, contract.openInterest),
+      liquidityTier: classifyLiquidity(result.bid, result.ask, contract.openInterest)
     })
   }
   if (evaluated.length === 0) return null

@@ -38,6 +38,20 @@ export const SwingAlertCard: React.FC<SwingAlertCardProps> = ({ alert }) => {
           {alert.vega != null && <span className="ml-2">V {alert.vega.toFixed(2)}</span>}
         </div>
       )}
+      {alert.ideal_entry_price != null && (
+        <div className="text-xs mt-1">
+          <span className="text-green-400 font-semibold">Ideal entry ~${alert.ideal_entry_price.toFixed(2)}</span>
+          {alert.bid_price != null && alert.ask_price != null && (
+            <span className="text-gray-400 ml-2">(bid ${alert.bid_price.toFixed(2)} / ask ${alert.ask_price.toFixed(2)})</span>
+          )}
+          {alert.liquidity_tier != null && (
+            <span className={`ml-2 px-1 rounded ${alert.liquidity_tier === 'tight' ? 'bg-green-900 text-green-300' : alert.liquidity_tier === 'moderate' ? 'bg-yellow-900 text-yellow-300' : 'bg-red-900 text-red-300'}`}>
+              {alert.liquidity_tier} liquidity
+            </span>
+          )}
+          {alert.open_interest != null && <span className="text-gray-400 ml-2">OI {alert.open_interest}</span>}
+        </div>
+      )}
       {alert.iv_current != null && (
         <div className="text-xs text-gray-400 mt-1">
           IV {(alert.iv_current * 100).toFixed(0)}%

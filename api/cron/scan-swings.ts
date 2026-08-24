@@ -150,7 +150,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               vega: opportunity?.strike.vega ?? null,
               iv_current: opportunity?.strike.iv ?? null,
               iv_rank: ivRankValue,
-              entry_rationale: opportunity?.rationale ?? null
+              entry_rationale: opportunity?.rationale ?? null,
+              bid_price: opportunity?.strike.bid ?? null,
+              ask_price: opportunity?.strike.ask ?? null,
+              ideal_entry_price: opportunity?.strike.idealEntryPrice ?? null,
+              open_interest: opportunity?.strike.openInterest ?? null,
+              liquidity_tier: opportunity?.strike.liquidityTier ?? null
             },
             { onConflict: 'symbol' }
           )
@@ -161,7 +166,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           // while the symbol remains oversold/overbought across subsequent runs.
           if (!existing) {
             const strikeDetail = opportunity
-              ? `, $${opportunity.strike.strikePrice}${signalType === 'CALL' ? 'C' : 'P'} Δ${opportunity.strike.delta.toFixed(2)}${ivRankValue !== null ? `, IV rank ${ivRankValue.toFixed(0)}%` : ''}`
+              ? `, $${opportunity.strike.strikePrice}${signalType === 'CALL' ? 'C' : 'P'} Δ${opportunity.strike.delta.toFixed(2)}${ivRankValue !== null ? `, IV rank ${ivRankValue.toFixed(0)}%` : ''}, entry ~$${opportunity.strike.idealEntryPrice.toFixed(2)}`
               : ''
             await sendToTopic(
               ALERTS_TOPIC,
