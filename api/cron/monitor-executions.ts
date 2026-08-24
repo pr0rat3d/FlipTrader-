@@ -37,8 +37,20 @@ export const config = {
 // poll's cadence at all - a slower poll here only affects how quickly tier
 // fills/runner targets/stop-order-fill bookkeeping get noticed, not whether
 // a fast adverse move gets caught.
+//
+// CHECKS_PER_INVOCATION: 2 -> 1 (2026-08-24), to cut this cron's Vercel
+// Fluid Active CPU cost roughly in half (this function's per-minute-forever
+// cadence during market hours is the single biggest CPU consumer in the
+// project, well ahead of scan-swings) - safe for the same reason the
+// tightened cadence above was already safe: real stop protection is
+// broker-side, unaffected either way. Only effect: bookkeeping/self-heal
+// reaction time on a genuinely missing stop grows from ~6s worst-case to
+// ~60s worst-case (still bounded by the once-a-minute external trigger) -
+// a real but small tradeoff, not a protection gap. CHECK_INTERVAL_MS is
+// inert at CHECKS_PER_INVOCATION=1 (the sleep below never fires) - left in
+// place as documentation/for reverting, not dead code to clean up.
 const CHECK_INTERVAL_MS = 6_000
-const CHECKS_PER_INVOCATION = 2
+const CHECKS_PER_INVOCATION = 1
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
