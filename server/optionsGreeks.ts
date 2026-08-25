@@ -27,7 +27,12 @@ export type OptionType = 'call' | 'put'
 export const RISK_FREE_RATE = 0.05
 const MIN_TIME_TO_EXPIRY_YEARS = 1 / 365 // floor at 1 day - swing contracts are always multi-day, never 0DTE
 
-const bsPrice = (spot: number, strike: number, T: number, r: number, sigma: number, type: OptionType): number => {
+// Exported (2026-08-25) for the swing backtest (scripts/swingBacktestRun.ts),
+// which needs the actual premium (not just Greeks) to track P&L day-by-day
+// as a simulated position ages toward expiration - kept as the exact same
+// function live Greeks/IV solving already uses, not a second reimplementation
+// that could drift out of sync with it.
+export const bsPrice = (spot: number, strike: number, T: number, r: number, sigma: number, type: OptionType): number => {
   const d1 = (Math.log(spot / strike) + (r + (sigma * sigma) / 2) * T) / (sigma * Math.sqrt(T))
   const d2 = d1 - sigma * Math.sqrt(T)
   return type === 'call'
