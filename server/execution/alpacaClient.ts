@@ -30,16 +30,41 @@ export const describeAlpacaError = (e: unknown): string => {
   return String(e)
 }
 
+// Two separate Alpaca paper accounts as of 2026-08-25 (user decision: real
+// capital separation between the 0DTE day-trading bot and the not-yet-built
+// swing execution system, rather than one shared account/buying-power pool -
+// this project has an already-documented history of shared-pool partitions
+// leaking into each other, see feedback_shared_capital_pool_halfmeasures in
+// memory). Every function below takes an optional `account` param
+// (defaulting to 'day_trade') instead of this module having two near-
+// duplicate copies of every function - keeps the day-trading call sites
+// (execute-alerts.ts, monitor-executions.ts, track-profit-targets.ts) totally
+// unchanged, they just implicitly keep using the original account. Swing
+// execution code (not yet built) passes account: 'swing' explicitly. Pure
+// market-data endpoints (bars/quotes/option contracts) don't actually need
+// per-account credentials - Alpaca's market data isn't account-scoped - but
+// they still take the param for uniformity, so nothing in this file quietly
+// depends on "which functions matter for account state" tribal knowledge.
+export type AlpacaAccountKey = 'day_trade' | 'swing'
+
 // Env read lazily inside each function (not at module load) so an unrelated
 // function importing this module can't crash on missing Alpaca env - same
 // reasoning as finnhub.ts's module-level constant, but this module is used
 // from crons where a misconfigured Alpaca key must not break market-hours
 // scanning if it were ever accidentally imported alongside it.
-const tradingHeaders = () => ({
-  'APCA-API-KEY-ID': process.env.ALPACA_API_KEY_ID || '',
-  'APCA-API-SECRET-KEY': process.env.ALPACA_API_SECRET_KEY || ''
-})
+const tradingHeaders = (account: AlpacaAccountKey = 'day_trade') => {
+  const [keyIdVar, secretVar] = account === 'swing'
+    ? ['ALPACA_SWING_API_KEY_ID', 'ALPACA_SWING_API_SECRET_KEY']
+    : ['ALPACA_API_KEY_ID', 'ALPACA_API_SECRET_KEY']
+  return {
+    'APCA-API-KEY-ID': process.env[keyIdVar] || '',
+    'APCA-API-SECRET-KEY': process.env[secretVar] || ''
+  }
+}
 
+// Base URLs are the same regardless of which account's credentials are used -
+// paper-api.alpaca.markets/data.alpaca.markets are shared endpoints, only the
+// headers above differentiate which account a request acts on.
 const tradingBaseUrl = () => process.env.ALPACA_API_BASE_URL || 'https://paper-api.alpaca.markets'
 // Market data API is a separate host from the trading API regardless of
 // paper/live - see Alpaca's docs (data.alpaca.markets serves both).
@@ -51,9 +76,9 @@ export interface AlpacaAccount {
   cash: number
 }
 
-export const getAccount = async (): Promise<AlpacaAccount | null> => {
+export const getAccount = async (account: AlpacaAccountKey = 'day_trade'): Promise<AlpacaAccount | null> => {
   try {
-    const response = await http.get(`${tradingBaseUrl()}/v2/account`, { headers: tradingHeaders() })
+    const response = await http.get(`${tradingBaseUrl()}/v2/account`, { headers: tradingHeaders(account) })
     return {
       equity: parseFloat(response.data.equity),
       buying_power: parseFloat(response.data.buying_power),
@@ -71,9 +96,9 @@ export interface AlpacaPosition {
   side: 'long' | 'short'
 }
 
-export const getPositions = async (): Promise<AlpacaPosition[] | null> => {
+export const getPositions = async (account: AlpacaAccountKey = 'day_trade'): Promise<AlpacaPosition[] | null> => {
   try {
-    const response = await http.get(`${tradingBaseUrl()}/v2/positions`, { headers: tradingHeaders() })
+    const response = await http.get(`${tradingBaseUrl()}/v2/positions`, { headers: tradingHeaders(account) })
     return response.data.map((p: any) => ({ symbol: p.symbol, qty: parseFloat(p.qty), side: p.side }))
   } catch (error) {
     console.error('Error fetching Alpaca positions:', error)
@@ -93,10 +118,10 @@ export interface AlpacaOrder {
   filled_avg_price: string | null
 }
 
-export const getOpenOrders = async (symbol: string): Promise<AlpacaOrder[] | null> => {
+export const getOpenOrders = async (symbol: string, account: AlpacaAccountKey = 'day_trade'): Promise<AlpacaOrder[] | null> => {
   try {
     const response = await http.get(`${tradingBaseUrl()}/v2/orders`, {
-      headers: tradingHeaders(),
+      headers: tradingHeaders(account),
       params: { status: 'open', symbols: symbol }
     })
     return response.data
@@ -106,9 +131,9 @@ export const getOpenOrders = async (symbol: string): Promise<AlpacaOrder[] | nul
   }
 }
 
-export const getOrder = async (orderId: string): Promise<AlpacaOrder | null> => {
+export const getOrder = async (orderId: string, account: AlpacaAccountKey = 'day_trade'): Promise<AlpacaOrder | null> => {
   try {
-    const response = await http.get(`${tradingBaseUrl()}/v2/orders/${orderId}`, { headers: tradingHeaders() })
+    const response = await http.get(`${tradingBaseUrl()}/v2/orders/${orderId}`, { headers: tradingHeaders(account) })
     return response.data
   } catch (error) {
     console.error(`Error fetching order ${orderId}:`, error)
@@ -129,7 +154,7 @@ export interface PlaceOrderParams {
 
 // Throws on failure - order placement is a critical action the caller must
 // handle explicitly (unlike the read functions above, which degrade to null).
-export const placeOrder = async (params: PlaceOrderParams): Promise<AlpacaOrder> => {
+export const placeOrder = async (params: PlaceOrderParams, account: AlpacaAccountKey = 'day_trade'): Promise<AlpacaOrder> => {
   const body: Record<string, unknown> = {
     symbol: params.symbol,
     qty: params.qty,
@@ -141,13 +166,13 @@ export const placeOrder = async (params: PlaceOrderParams): Promise<AlpacaOrder>
   if (params.limitPrice !== undefined) body.limit_price = params.limitPrice.toFixed(2)
   if (params.stopPrice !== undefined) body.stop_price = params.stopPrice.toFixed(2)
 
-  const response = await http.post(`${tradingBaseUrl()}/v2/orders`, body, { headers: tradingHeaders() })
+  const response = await http.post(`${tradingBaseUrl()}/v2/orders`, body, { headers: tradingHeaders(account) })
   return response.data
 }
 
-export const cancelOrder = async (orderId: string): Promise<boolean> => {
+export const cancelOrder = async (orderId: string, account: AlpacaAccountKey = 'day_trade'): Promise<boolean> => {
   try {
-    await http.delete(`${tradingBaseUrl()}/v2/orders/${orderId}`, { headers: tradingHeaders() })
+    await http.delete(`${tradingBaseUrl()}/v2/orders/${orderId}`, { headers: tradingHeaders(account) })
     return true
   } catch (error) {
     console.error(`Error cancelling order ${orderId}:`, error)
@@ -163,13 +188,13 @@ export interface ReplaceOrderParams {
 
 // Throws on failure - callers replacing a resting stop need to know explicitly
 // if the replace didn't go through rather than silently continuing as if it did.
-export const replaceOrder = async (orderId: string, params: ReplaceOrderParams): Promise<AlpacaOrder> => {
+export const replaceOrder = async (orderId: string, params: ReplaceOrderParams, account: AlpacaAccountKey = 'day_trade'): Promise<AlpacaOrder> => {
   const body: Record<string, unknown> = {}
   if (params.qty !== undefined) body.qty = params.qty
   if (params.limitPrice !== undefined) body.limit_price = params.limitPrice.toFixed(2)
   if (params.stopPrice !== undefined) body.stop_price = params.stopPrice.toFixed(2)
 
-  const response = await http.patch(`${tradingBaseUrl()}/v2/orders/${orderId}`, body, { headers: tradingHeaders() })
+  const response = await http.patch(`${tradingBaseUrl()}/v2/orders/${orderId}`, body, { headers: tradingHeaders(account) })
   return response.data
 }
 
@@ -182,10 +207,10 @@ export interface AlpacaBar {
   v: number
 }
 
-export const getBars1Min = async (symbol: string, start: Date, end: Date): Promise<AlpacaBar[] | null> => {
+export const getBars1Min = async (symbol: string, start: Date, end: Date, account: AlpacaAccountKey = 'day_trade'): Promise<AlpacaBar[] | null> => {
   try {
     const response = await http.get(`${dataBaseUrl()}/v2/stocks/${symbol}/bars`, {
-      headers: tradingHeaders(),
+      headers: tradingHeaders(account),
       params: {
         timeframe: '1Min',
         start: start.toISOString(),
@@ -215,14 +240,14 @@ const toCandle = (b: AlpacaBar): Candle => ({
   open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v, datetime: b.t
 })
 
-export const getBars5Min = async (symbol: string, lookbackBars: number = 300): Promise<Candle[] | null> => {
+export const getBars5Min = async (symbol: string, lookbackBars: number = 300, account: AlpacaAccountKey = 'day_trade'): Promise<Candle[] | null> => {
   try {
     const end = new Date()
     // ~7 calendar days covers 300 5-min regular-session bars even across a
     // weekend/holiday gap, same margin twelvedata.ts's equivalent uses.
     const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
     const response = await http.get(`${dataBaseUrl()}/v2/stocks/${symbol}/bars`, {
-      headers: tradingHeaders(),
+      headers: tradingHeaders(account),
       params: {
         timeframe: '5Min',
         start: start.toISOString(),
@@ -258,11 +283,12 @@ export const findOptionContract = async (
   underlyingSymbol: string,
   expirationDate: string,
   desiredStrike: number,
-  contractType: 'call' | 'put'
+  contractType: 'call' | 'put',
+  account: AlpacaAccountKey = 'day_trade'
 ): Promise<OptionContract | null> => {
   try {
     const response = await http.get(`${tradingBaseUrl()}/v2/options/contracts`, {
-      headers: tradingHeaders(),
+      headers: tradingHeaders(account),
       params: {
         underlying_symbols: underlyingSymbol,
         expiration_date: expirationDate,
@@ -301,11 +327,12 @@ export const getAvailableExpirations = async (
   underlyingSymbol: string,
   contractType: 'call' | 'put',
   gte: string,
-  lte: string
+  lte: string,
+  account: AlpacaAccountKey = 'day_trade'
 ): Promise<string[] | null> => {
   try {
     const response = await http.get(`${tradingBaseUrl()}/v2/options/contracts`, {
-      headers: tradingHeaders(),
+      headers: tradingHeaders(account),
       params: {
         underlying_symbols: underlyingSymbol,
         expiration_date_gte: gte,
@@ -336,12 +363,13 @@ export const listOptionContractsNear = async (
   underlyingSymbol: string,
   expirationDate: string,
   centerStrike: number,
-  contractType: 'call' | 'put'
+  contractType: 'call' | 'put',
+  account: AlpacaAccountKey = 'day_trade'
 ): Promise<OptionContract[]> => {
   const range = Math.max(3, centerStrike * 0.15)
   try {
     const response = await http.get(`${tradingBaseUrl()}/v2/options/contracts`, {
-      headers: tradingHeaders(),
+      headers: tradingHeaders(account),
       params: {
         underlying_symbols: underlyingSymbol,
         expiration_date: expirationDate,
@@ -370,10 +398,10 @@ export interface OptionQuote {
   ask: number
 }
 
-export const getOptionQuote = async (optionSymbol: string): Promise<OptionQuote | null> => {
+export const getOptionQuote = async (optionSymbol: string, account: AlpacaAccountKey = 'day_trade'): Promise<OptionQuote | null> => {
   try {
     const response = await http.get(`${dataBaseUrl()}/v1beta1/options/quotes/latest`, {
-      headers: tradingHeaders(),
+      headers: tradingHeaders(account),
       params: { symbols: optionSymbol }
     })
     const q = response.data?.quotes?.[optionSymbol]
@@ -394,10 +422,10 @@ export interface OptionBar {
   v: number
 }
 
-export const getOptionBars1Min = async (optionSymbol: string, start: Date, end: Date): Promise<OptionBar[] | null> => {
+export const getOptionBars1Min = async (optionSymbol: string, start: Date, end: Date, account: AlpacaAccountKey = 'day_trade'): Promise<OptionBar[] | null> => {
   try {
     const response = await http.get(`${dataBaseUrl()}/v1beta1/options/bars`, {
-      headers: tradingHeaders(),
+      headers: tradingHeaders(account),
       params: {
         symbols: optionSymbol,
         timeframe: '1Min',
