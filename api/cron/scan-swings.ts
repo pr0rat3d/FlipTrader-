@@ -131,7 +131,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // duplicate card every run.
         const { data: existing } = await supabase
           .from('swing_trade_alerts')
-          .select('id')
+          .select('id, entry_attempted')
           .eq('symbol', symbol)
           .maybeSingle()
 
@@ -155,7 +155,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               ask_price: opportunity?.strike.ask ?? null,
               ideal_entry_price: opportunity?.strike.idealEntryPrice ?? null,
               open_interest: opportunity?.strike.openInterest ?? null,
-              liquidity_tier: opportunity?.strike.liquidityTier ?? null
+              liquidity_tier: opportunity?.strike.liquidityTier ?? null,
+              // false only on a genuinely new occurrence - preserves
+              // whatever execute-swings.ts already set on a re-check, so a
+              // symbol that stays oversold across many runs never gets
+              // re-entered (see migration 026's comment for the full
+              // reasoning).
+              entry_attempted: existing ? existing.entry_attempted : false
             },
             { onConflict: 'symbol' }
           )

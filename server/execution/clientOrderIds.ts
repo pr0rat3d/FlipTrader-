@@ -45,3 +45,12 @@ export const optionClientOrderIds = (profitTargetId: string) => ({
   // (Alpaca rejects a sell-stop priced above the current market).
   stopHealMarketSell: () => `opt-stophealsell-${Date.now()}-${profitTargetId}`
 })
+
+// Swing execution (2026-08-25) - keyed off swing_trade_alerts.id, distinct
+// namespace prefix (`sw-`) from the 0DTE `opt-`/plain ids above so a stray
+// collision between the two systems is structurally impossible, not just
+// unlikely.
+export const swingClientOrderIds = (alertId: string) => ({
+  entry: `sw-entry-${alertId}`,
+  exit: (attempt: number) => `sw-exit${attempt}-${alertId}`
+})
