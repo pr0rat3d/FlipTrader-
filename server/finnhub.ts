@@ -68,14 +68,31 @@ export interface USSymbol {
   symbol: string
 }
 
+// Standard OTC Markets Group ticker convention: a 5-letter symbol ending in
+// F is an unsponsored "foreign private issuer" ordinary share traded on the
+// Pink/Grey OTC tier, ending in Y is an unsponsored OTC ADR - both are
+// distinct from a REAL sponsored NYSE/NASDAQ-listed ADR (BABA, TSM, ASML,
+// UL, ...), which always has a short, clean ticker with no such suffix.
+// Confirmed empirically 2026-08-25: every OTC-junk symbol observed in a
+// live ranking cycle (SSNLF/Samsung, UNLRF/Unilever Indonesia, PTPIF, ...)
+// matched this exact pattern, while real ADRs (BABA, TSM, ASML) never do -
+// a much more reliable signal than Finnhub's own country/exchange fields
+// on /stock/profile2, which turned out to be INCONSISTENT for this purpose
+// (TSM's profile reports "TAIWAN STOCK EXCHANGE" as its exchange despite
+// TSM being a genuinely liquid NYSE-listed ADR - country/exchange reflect
+// the company's home listing, not whether THIS ticker is the real US one).
+const OTC_FOREIGN_TICKER_PATTERN = /^[A-Z]{4}[FY]$/
+
 // Full US common-stock candidate list for the market-cap ranking job
 // (server/marketCapRanking.ts) - one call returns the whole exchange listing
 // (thousands of entries), so this is only ever called once per ranking
 // cycle (roughly monthly), never per-scan. `.`-suffixed symbols (share
-// classes, warrants, etc. Finnhub sometimes lists separately) and non-
-// "Common Stock" types (ETFs, ADRs, units, warrants) are dropped - the
-// ranking only cares about real US common stock, matching this app's
-// existing options-tradability assumptions elsewhere.
+// classes, warrants, etc. Finnhub sometimes lists separately), non-
+// "Common Stock" types (ETFs, ADRs, units, warrants), and the OTC-foreign
+// ticker pattern above are all dropped before a single market-cap lookup
+// happens - cheaper (no wasted API calls on symbols that could never
+// belong in a real "top US companies" list) and more correct than filtering
+// after the fact.
 export const listUSCommonStockSymbols = async (): Promise<USSymbol[]> => {
   try {
     const response = await axios.get(`${BASE_URL}/stock/symbol`, {
@@ -86,7 +103,12 @@ export const listUSCommonStockSymbols = async (): Promise<USSymbol[]> => {
     if (!Array.isArray(results)) return []
 
     return results
-      .filter((r: any) => r.type === 'Common Stock' && typeof r.symbol === 'string' && !r.symbol.includes('.'))
+      .filter((r: any) =>
+        r.type === 'Common Stock' &&
+        typeof r.symbol === 'string' &&
+        !r.symbol.includes('.') &&
+        !OTC_FOREIGN_TICKER_PATTERN.test(r.symbol)
+      )
       .map((r: any) => ({ symbol: r.symbol }))
   } catch (error) {
     console.error('Error listing US common stock symbols:', error)
@@ -97,6 +119,7 @@ export const listUSCommonStockSymbols = async (): Promise<USSymbol[]> => {
 export interface CompanyProfile {
   marketCapitalization: number | null
   industry: string | null
+  country: string | null
 }
 
 // Finnhub's free tier has no market-cap SCREENER (confirmed empirically
@@ -106,6 +129,18 @@ export interface CompanyProfile {
 // with getQuote/searchSymbols elsewhere in this app (low volume, not a real
 // contention risk) - the ranking job's own batch size is what actually
 // respects this, see MARKET_CAP_BATCH_SIZE in marketCapRanking.ts.
+//
+// `country` is critical, not optional metadata: Finnhub's `exchange=US`
+// symbol list (listUSCommonStockSymbols) includes foreign companies traded
+// OTC in the US (e.g. SSNLF = Samsung Electronics, country "KR") - their
+// marketCapitalization is reported in their HOME currency (KRW for
+// Samsung), not consistently USD, so comparing it raw against a real US
+// company's USD figure is meaningless (found live 2026-08-25: this bug let
+// Samsung/Unilever-Indonesia/etc. outrank every real US mega-cap and fill
+// most of a "top 100 US companies" list). `currency === 'USD'` alone isn't
+// reliable either - some foreign filers (e.g. an Indonesian company)
+// report in USD anyway while still not being a US company - `country`
+// is the actual signal callers should filter on.
 export const getCompanyProfile = async (symbol: string): Promise<CompanyProfile | null> => {
   try {
     const response = await axios.get(`${BASE_URL}/stock/profile2`, {
@@ -116,7 +151,8 @@ export const getCompanyProfile = async (symbol: string): Promise<CompanyProfile 
     if (!data || typeof data !== 'object') return null
     return {
       marketCapitalization: typeof data.marketCapitalization === 'number' ? data.marketCapitalization : null,
-      industry: typeof data.finnhubIndustry === 'string' ? data.finnhubIndustry : null
+      industry: typeof data.finnhubIndustry === 'string' ? data.finnhubIndustry : null,
+      country: typeof data.country === 'string' ? data.country : null
     }
   } catch (error) {
     console.error(`Error fetching company profile for ${symbol}:`, error)

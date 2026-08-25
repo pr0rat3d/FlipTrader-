@@ -142,13 +142,24 @@ export const advanceRankingCycle = async (): Promise<RankingStepResult> => {
       await supabase.from('market_cap_candidates').update({
         market_cap: profile?.marketCapitalization ?? null,
         industry: profile?.industry ?? null,
+        country: profile?.country ?? null,
         checked_at: new Date().toISOString()
       }).eq('symbol', symbol)
     }
     return { phase: 'ranking', detail: `checked ${batch.length} symbols` }
   }
 
-  // finalizing
+  // finalizing. No country/exchange filter here - found live 2026-08-25
+  // that Finnhub's own country/exchange fields are unreliable for
+  // distinguishing "real NYSE/NASDAQ-listed ADR" (BABA, TSM, ASML - legit,
+  // liquid, belongs in this ranking) from "OTC-only foreign ordinary
+  // share" (SSNLF, UNLRF - illiquid, produces degenerate RSI, does NOT
+  // belong) - TSM's own profile reports "TAIWAN STOCK EXCHANGE" despite
+  // being a genuinely liquid US-listed ADR. The real fix is upstream in
+  // listUSCommonStockSymbols (server/finnhub.ts) - OTC-junk tickers never
+  // even become candidates, so a plain top-N-by-market-cap here is safe.
+  // `country` is still captured/stored for diagnostics, just not filtered
+  // on.
   const { data: top } = await supabase
     .from('market_cap_candidates')
     .select('symbol, market_cap, industry')

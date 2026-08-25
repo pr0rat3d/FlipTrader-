@@ -1,0 +1,11 @@
+-- Fixes a real bug found live 2026-08-25: the ranking job's first cycle
+-- ranked candidates by raw market_cap alone, which let foreign companies
+-- traded OTC in the US (Finnhub's exchange=US listing includes them -
+-- Samsung Electronics/SSNLF, Unilever Indonesia/UNLRF, etc.) outrank every
+-- real US mega-cap, since their marketCapitalization is reported in their
+-- home currency (KRW, IDR, ...) rather than consistently USD - a raw
+-- numeric comparison against a USD-reporting US company is meaningless.
+-- country is the actual signal to filter on (server/finnhub.ts's
+-- getCompanyProfile comment has the full reasoning, including why
+-- `currency === 'USD'` alone isn't reliable either).
+ALTER TABLE market_cap_candidates ADD COLUMN country TEXT;
