@@ -2,9 +2,10 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { isMarketOpen } from '../../server/marketHours.js'
-import { getAccount, getOrder, getOptionQuote, placeOrder, describeAlpacaError } from '../../server/execution/alpacaClient.js'
-import { computeSwingContractCount, PROFIT_TARGET_PCT, STOP_LOSS_PCT, DAYS_TO_EXPIRY_FORCE_CLOSE } from '../../server/execution/swingPositionSizing.js'
+import { getAccount, getOrder, getOptionQuote, getBars5Min, placeOrder, describeAlpacaError } from '../../server/execution/alpacaClient.js'
+import { computeSwingContractCount, MIN_CONTRACTS, MAX_POSITION_DOLLARS, PROFIT_TARGET_PCT, STOP_LOSS_PCT, DAYS_TO_EXPIRY_FORCE_CLOSE } from '../../server/execution/swingPositionSizing.js'
 import { swingClientOrderIds } from '../../server/execution/clientOrderIds.js'
+import { selectSwingStrike } from '../../server/swingOptionSelection.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 
@@ -173,9 +174,41 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           continue
         }
 
+        // The alert's own strike (picked purely by delta-closest-to-0.40,
+        // see swingOptionSelection.ts) may be too rich to afford
+        // MIN_CONTRACTS within MAX_POSITION_DOLLARS - "move out a few
+        // strikes to make it fit" (user's framing, 2026-08-26) rather than
+        // skip a real signal over one specific strike being pricey.
+        // Re-runs strike selection with an affordability filter, biased
+        // toward a fresh live spot (5-min bar close, Alpaca - not another
+        // Twelve Data credit spend) rather than reusing the alert's own
+        // possibly-stale spot-derived numbers.
+        let optionSymbol = alert.option_symbol!
+        let strikePrice = alert.recommended_strike
+        let entryPrice = alert.ideal_entry_price
+        let askPrice = alert.ask_price
+
+        const maxPremium = MAX_POSITION_DOLLARS / (MIN_CONTRACTS * 100)
+        if (askPrice > maxPremium) {
+          const bars = await getBars5Min(alert.symbol, 2, 'swing')
+          const spot = bars && bars.length > 0 ? bars[bars.length - 1].close : null
+          const cheaper = spot
+            ? await selectSwingStrike(alert.symbol, 'bullish', alert.expiration_date, spot, maxPremium)
+            : null
+
+          if (!cheaper) {
+            entryResults.push({ symbol: alert.symbol, outcome: `skipped: no affordable strike found under $${MAX_POSITION_DOLLARS}/${MIN_CONTRACTS}` })
+            continue
+          }
+          optionSymbol = cheaper.optionSymbol
+          strikePrice = cheaper.strikePrice
+          entryPrice = cheaper.idealEntryPrice
+          askPrice = cheaper.ask
+        }
+
         const sizing = computeSwingContractCount({
           buyingPower: account.buying_power,
-          premiumAsk: alert.ask_price,
+          premiumAsk: askPrice,
           currentOpenPositions
         })
 
@@ -187,30 +220,30 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         try {
           const ids = swingClientOrderIds(alert.id)
           const order = await placeOrder({
-            symbol: alert.option_symbol!,
+            symbol: optionSymbol,
             qty: sizing.contracts,
             side: 'buy',
             type: 'limit',
             timeInForce: 'day',
-            limitPrice: alert.ideal_entry_price,
+            limitPrice: entryPrice,
             clientOrderId: ids.entry
           }, 'swing')
 
           await supabase.from('swing_positions').insert({
             underlying_symbol: alert.symbol,
-            option_symbol: alert.option_symbol,
+            option_symbol: optionSymbol,
             direction: 'bullish',
             contracts: sizing.contracts,
-            premium_entry: alert.ideal_entry_price,
-            strike_price: alert.recommended_strike,
+            premium_entry: entryPrice,
+            strike_price: strikePrice,
             expiration_date: alert.expiration_date,
             status: 'entry_submitted',
             entry_order_id: order.id
           })
 
           currentOpenPositions++
-          entryResults.push({ symbol: alert.symbol, outcome: `submitted: ${sizing.contracts}x @ $${alert.ideal_entry_price}` })
-          await sendToTopic(ALERTS_TOPIC, `Swing entry: ${alert.symbol}`, `${sizing.contracts}x $${alert.recommended_strike}C exp ${alert.expiration_date}, limit $${alert.ideal_entry_price}`)
+          entryResults.push({ symbol: alert.symbol, outcome: `submitted: ${sizing.contracts}x @ $${entryPrice} (strike $${strikePrice})` })
+          await sendToTopic(ALERTS_TOPIC, `Swing entry: ${alert.symbol}`, `${sizing.contracts}x $${strikePrice}C exp ${alert.expiration_date}, limit $${entryPrice}`)
         } catch (error) {
           entryResults.push({ symbol: alert.symbol, outcome: `order failed: ${describeAlpacaError(error)}` })
         }

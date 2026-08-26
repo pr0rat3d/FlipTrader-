@@ -126,8 +126,19 @@ export interface SwingStrikeSelection {
 // delta moves nonlinearly with both moneyness and this expiry's own time
 // value. Falls back to the closest-to-band candidate if none land inside it
 // (flagged via `inBand: false` so callers/dashboard can show that plainly).
+//
+// maxPremiumForBudget (optional, 2026-08-26): when the execution side's
+// fixed dollar cap (server/execution/swingPositionSizing.ts's
+// MAX_POSITION_DOLLARS) can't afford MIN_CONTRACTS at the normal delta-
+// closest-to-0.40 strike, this re-runs selection with candidates filtered
+// to affordable ones FIRST, still preferring the closest-to-0.40 delta
+// among those - "move out a few strikes to make it fit," user's own
+// framing, rather than skipping a real signal just because the ATM-ish
+// strike happened to be rich. Returns null only if NOTHING in the whole
+// listed range is affordable, not just the ideal-delta one.
 export const selectSwingStrike = async (
-  underlyingSymbol: string, direction: 'bullish' | 'bearish', expirationDate: string, spotPrice: number
+  underlyingSymbol: string, direction: 'bullish' | 'bearish', expirationDate: string, spotPrice: number,
+  maxPremiumForBudget?: number
 ): Promise<SwingStrikeSelection | null> => {
   const contractType: OptionType = direction === 'bullish' ? 'call' : 'put'
   const candidates = await listOptionContractsNear(underlyingSymbol, expirationDate, spotPrice, contractType)
@@ -152,7 +163,10 @@ export const selectSwingStrike = async (
   }
   if (evaluated.length === 0) return null
 
-  const inBand = evaluated.filter(e => e.inBand)
+  const pool = maxPremiumForBudget !== undefined ? evaluated.filter(e => e.ask <= maxPremiumForBudget) : evaluated
+  if (pool.length === 0) return null
+
+  const inBand = pool.filter(e => e.inBand)
   if (inBand.length > 0) {
     return inBand.reduce((best, e) => Math.abs(Math.abs(e.delta) - 0.40) < Math.abs(Math.abs(best.delta) - 0.40) ? e : best)
   }
@@ -164,7 +178,7 @@ export const selectSwingStrike = async (
     if (abs > DELTA_BAND.max) return abs - DELTA_BAND.max
     return 0
   }
-  return evaluated.reduce((best, e) => distanceToBand(e.delta) < distanceToBand(best.delta) ? e : best)
+  return pool.reduce((best, e) => distanceToBand(e.delta) < distanceToBand(best.delta) ? e : best)
 }
 
 export interface IvRankResult {

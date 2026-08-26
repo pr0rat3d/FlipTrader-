@@ -49,11 +49,12 @@ export const DAYS_TO_EXPIRY_FORCE_CLOSE = 3
 // capital-concentration ceiling for a smaller, newer capital pool.
 export const MAX_CONCURRENT_SWING_POSITIONS = 3
 
-// Swing contracts have no MIN=2 floor the way 0DTE does - that floor exists
-// specifically because the 0DTE tier-ladder strategy needs at least 2
-// contracts to scale out of at all. With no tier ladder here, 1 contract is
-// a completely valid, normal position size, not a degraded fallback.
-const MIN_CONTRACTS = 1
+// User-specified floor (2026-08-26): every swing position is at least 2
+// contracts. If the selected strike is too rich to afford 2 within
+// MAX_POSITION_DOLLARS, the fix is picking a cheaper (further OTM) strike -
+// see selectSwingStrike's maxPremiumForBudget param in
+// swingOptionSelection.ts - not shrinking down to 1 contract.
+export const MIN_CONTRACTS = 2
 
 // Replaces the original riskPct-of-buying-power sizing (2026-08-26, user-
 // specified): a flat dollar cap per position instead of a percentage of
