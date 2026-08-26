@@ -44,10 +44,10 @@ export const DAYS_TO_EXPIRY_FORCE_CLOSE = 3
 // Analogous to the 0DTE bot's max_daily_entries, but scoped to CONCURRENT
 // open positions instead of a daily count - swing entries aren't a
 // daily-reset activity (a position can still be open days after it opened),
-// so "how many did we open today" isn't the right cap. This is instead a
-// simple diversification/capital-concentration ceiling for a smaller, newer
-// capital pool - not derived from any real data yet.
-export const MAX_CONCURRENT_SWING_POSITIONS = 4
+// so "how many did we open today" isn't the right cap. User-specified cap
+// (2026-08-25), not derived from backtest data - a diversification/
+// capital-concentration ceiling for a smaller, newer capital pool.
+export const MAX_CONCURRENT_SWING_POSITIONS = 3
 
 // Swing contracts have no MIN=2 floor the way 0DTE does - that floor exists
 // specifically because the 0DTE tier-ladder strategy needs at least 2
