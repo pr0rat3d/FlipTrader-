@@ -175,7 +175,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         const sizing = computeSwingContractCount({
           buyingPower: account.buying_power,
-          riskPct: 0.15,
           premiumAsk: alert.ask_price,
           currentOpenPositions
         })

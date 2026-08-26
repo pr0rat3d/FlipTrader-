@@ -24,14 +24,14 @@
 // tiering only if real capital/results ever justify sizing above ~3
 // contracts routinely.
 export const PROFIT_TARGET_PCT = 0.30
-// Wider than the 0DTE bot's 25% hard stop, deliberately - a multi-day hold
-// sees much more day-to-day premium noise without the thesis actually being
-// invalidated (a single volatile session can move a multi-week option's
-// premium 15-20% on IV alone, not just directional movement). A stop this
-// tight on a swing hold would mostly be exiting on noise, not a real signal
-// the trade is wrong - needs real backtest data to confirm/correct this
-// number, this is a reasoned guess, not a measured one yet.
-export const STOP_LOSS_PCT = 0.35
+// 35% -> 50% (user-specified, 2026-08-26) - explicitly wider than the
+// backtested 35% (scripts/swingBacktestRun.ts's CALL-side edge was
+// measured against 35%, not this number) - user's own live-trading
+// judgment that a swing hold should tolerate more drawdown before being
+// cut than the backtest assumed. Worth re-running the backtest against
+// 50% if this ever needs re-validating, since the edge was measured at a
+// different number.
+export const STOP_LOSS_PCT = 0.50
 
 // Close out regardless of target/stop once this few TRADING days remain
 // before the contract's own expiration, to get out ahead of the theta/
@@ -54,15 +54,17 @@ export const MAX_CONCURRENT_SWING_POSITIONS = 3
 // contracts to scale out of at all. With no tier ladder here, 1 contract is
 // a completely valid, normal position size, not a degraded fallback.
 const MIN_CONTRACTS = 1
-const MAX_CONTRACTS = 3
 
-// Same riskPct-of-buying-power shape as computeContractCount in
-// optionPositionSizing.ts (that file's own comment explains why
-// equity-based sizing produced a budget too small to ever matter) - kept
-// deliberately separate rather than importing/sharing that function, since
-// this account's buying power, contract-count bounds, and premium scale are
-// all genuinely different numbers, not just a parameter swap.
-export const SWING_RISK_PCT = 0.15
+// Replaces the original riskPct-of-buying-power sizing (2026-08-26, user-
+// specified): a flat dollar cap per position instead of a percentage of
+// account buying power - simpler and more predictable for a fresh, smaller
+// capital pool than a percentage that moves with equity. User's own
+// example: a $0.94 premium contract (=$94/contract) should size to "about
+// 5" under this cap - the exact floor-division math below actually gives 6
+// ($564, still under $600; 7 would be $658, over) - worth knowing this
+// constant produces 6 in that exact scenario, one more than the illustrative
+// example, in case that matters to you.
+export const MAX_POSITION_DOLLARS = 600
 
 export type SwingContractSizeRejectReason =
   | 'invalid_premium'
@@ -71,7 +73,6 @@ export type SwingContractSizeRejectReason =
 
 export interface SwingContractSizeInput {
   buyingPower: number
-  riskPct: number
   premiumAsk: number
   currentOpenPositions: number
 }
@@ -81,7 +82,7 @@ export type SwingContractSizeResult =
   | { ok: false; reason: SwingContractSizeRejectReason }
 
 export const computeSwingContractCount = (input: SwingContractSizeInput): SwingContractSizeResult => {
-  const { buyingPower, riskPct, premiumAsk, currentOpenPositions } = input
+  const { buyingPower, premiumAsk, currentOpenPositions } = input
 
   if (currentOpenPositions >= MAX_CONCURRENT_SWING_POSITIONS) {
     return { ok: false, reason: 'max_concurrent_positions_reached' }
@@ -91,12 +92,9 @@ export const computeSwingContractCount = (input: SwingContractSizeInput): SwingC
   }
 
   const costPerContract = premiumAsk * 100
-  const riskBudget = buyingPower * riskPct
-  const desired = Math.floor(riskBudget / costPerContract)
-  const clamped = Math.min(MAX_CONTRACTS, Math.max(MIN_CONTRACTS, desired))
-
+  const desired = Math.floor(MAX_POSITION_DOLLARS / costPerContract)
   const affordable = Math.floor((buyingPower * 0.95) / costPerContract)
-  const contracts = Math.min(clamped, affordable)
+  const contracts = Math.min(Math.max(MIN_CONTRACTS, desired), affordable)
 
   if (contracts < MIN_CONTRACTS) {
     return { ok: false, reason: 'insufficient_buying_power' }
