@@ -17,7 +17,7 @@
 // would have produced" - same read-the-numbers caveat backtestRun.ts's own
 // header already gives for the 0DTE side.
 //
-// Usage: npx tsx scripts/swingBacktestRun.ts [--days 730]
+// Usage: npx tsx scripts/swingBacktestRun.ts [--days 730] [--rsi-oversold 30] [--rsi-overbought 70]
 
 import { readFileSync } from 'fs'
 try {
@@ -57,6 +57,10 @@ const IV_MARKUP = 1.20
 
 const args = process.argv.slice(2)
 const daysArg = args.includes('--days') ? parseInt(args[args.indexOf('--days') + 1], 10) : 730
+// Live thresholds (scan-swings.ts) are 30/70 - overridable here to test
+// looser oversold/overbought bands without touching the live scanner.
+const RSI_OVERSOLD = args.includes('--rsi-oversold') ? parseInt(args[args.indexOf('--rsi-oversold') + 1], 10) : 30
+const RSI_OVERBOUGHT = args.includes('--rsi-overbought') ? parseInt(args[args.indexOf('--rsi-overbought') + 1], 10) : 70
 
 const nearestFriday = (from: Date, targetDaysOut: number): Date => {
   const target = new Date(from.getTime() + targetDaysOut * 24 * 60 * 60 * 1000)
@@ -99,7 +103,7 @@ const closedTrades: ClosedTrade[] = []
 
 const { data: universeRows } = await supabase.from('sector_universe').select('symbol')
 const symbols = (universeRows ?? []).map(r => r.symbol)
-console.log(`Backtesting swing exit rules over ${symbols.length} symbols, ${daysArg} days`)
+console.log(`Backtesting swing exit rules over ${symbols.length} symbols, ${daysArg} days, RSI oversold<${RSI_OVERSOLD}/overbought>${RSI_OVERBOUGHT}`)
 
 const end = new Date().toISOString().slice(0, 10)
 const start = new Date(Date.now() - daysArg * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
@@ -119,7 +123,7 @@ for (const symbol of symbols) {
   for (let i = rsiOffset; i < closes.length; i++) {
     const rsiIndex = i - rsiOffset
     const rsi = rsiValues[rsiIndex]
-    const direction: 'bullish' | 'bearish' | null = rsi < 30 ? 'bullish' : rsi > 70 ? 'bearish' : null
+    const direction: 'bullish' | 'bearish' | null = rsi < RSI_OVERSOLD ? 'bullish' : rsi > RSI_OVERBOUGHT ? 'bearish' : null
     const dateStr = candles[i].datetime
     const spot = closes[i]
 
@@ -229,6 +233,6 @@ for (const direction of ['bullish', 'bearish'] as const) {
 
 import { writeFileSync, mkdirSync } from 'fs'
 mkdirSync('backtest_out', { recursive: true })
-const outFile = `backtest_out/swing_${start}_to_${end}.json`
+const outFile = `backtest_out/swing_${start}_to_${end}_rsi${RSI_OVERSOLD}-${RSI_OVERBOUGHT}.json`
 writeFileSync(outFile, JSON.stringify({ start, end, symbolsProcessed, trades: closedTrades }, null, 1))
 console.log(`\nFull detail written to ${outFile}`)

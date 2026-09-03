@@ -98,8 +98,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const currentRSI = rsiValues[rsiValues.length - 1]
       const spotPrice = closes[closes.length - 1]
 
+      // Oversold loosened 30->35 (2026-09-02) after backtesting showed it
+      // more than doubles CALL signal frequency (313->691 trades/2yr) for
+      // only a ~1pt win-rate hit, while avg premium move stays solidly
+      // positive (+12.9%->+6.1%) - see scripts/swingBacktestRun.ts
+      // --rsi-oversold. Overbought/PUT threshold left at 70 since that side
+      // isn't traded live anyway (execute-swings.ts is CALL-only, PUT
+      // backtested net-losing).
       const direction: 'bullish' | 'bearish' | null =
-        currentRSI < 30 ? 'bullish' : currentRSI > 70 ? 'bearish' : null
+        currentRSI < 35 ? 'bullish' : currentRSI > 70 ? 'bearish' : null
 
       if (direction) {
         const sector = sectorBySymbol[symbol] || 'other'
