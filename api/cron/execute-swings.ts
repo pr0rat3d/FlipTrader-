@@ -156,20 +156,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       for (const alert of pending) {
         // Marked attempted regardless of outcome below (success or any
         // failure) - one shot per oversold episode, same as every other
-        // entry gate in this app.
-        await supabase.from('swing_trade_alerts').update({ entry_attempted: true }).eq('id', alert.id)
+        // entry gate in this app. entry_skip_reason stays null here (set
+        // below on whichever pre-flight gate actually rejects, if any) -
+        // added 2026-09-03 after 5 real CALL alerts fired the same day the
+        // oversold threshold loosened (30->35) and every single one
+        // silently vanished with entry_attempted=true and no order ever
+        // reaching Alpaca - the skip reason previously only existed in
+        // this invocation's transient JSON response, making root-causing
+        // it after the fact require replaying this entire function by
+        // hand in a one-off script instead of just querying the DB.
+        const attemptedAt = new Date().toISOString()
+        await supabase.from('swing_trade_alerts').update({ entry_attempted: true, entry_attempted_at: attemptedAt }).eq('id', alert.id)
+        const markSkipped = (reason: string) =>
+          supabase.from('swing_trade_alerts').update({ entry_skip_reason: reason }).eq('id', alert.id)
 
         if (!account) {
+          await markSkipped('swing account unavailable')
           entryResults.push({ symbol: alert.symbol, outcome: 'skipped: swing account unavailable (check ALPACA_SWING_API_KEY_ID/SECRET)' })
           continue
         }
         if (!alert.ideal_entry_price || !alert.ask_price || !alert.recommended_strike || !alert.expiration_date) {
+          await markSkipped('incomplete pricing data')
           entryResults.push({ symbol: alert.symbol, outcome: 'skipped: incomplete pricing data' })
           continue
         }
 
         const ageMinutes = (Date.now() - new Date(alert.oversold_date).getTime()) / 60_000
         if (ageMinutes > STALENESS_CUTOFF_MINUTES) {
+          await markSkipped(`stale (${ageMinutes.toFixed(0)}min old pricing)`)
           entryResults.push({ symbol: alert.symbol, outcome: `skipped: stale (${ageMinutes.toFixed(0)}min old pricing)` })
           continue
         }
@@ -197,6 +211,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             : null
 
           if (!cheaper) {
+            await markSkipped(`no affordable strike found under $${MAX_POSITION_DOLLARS}/${MIN_CONTRACTS}`)
             entryResults.push({ symbol: alert.symbol, outcome: `skipped: no affordable strike found under $${MAX_POSITION_DOLLARS}/${MIN_CONTRACTS}` })
             continue
           }
@@ -213,6 +228,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         })
 
         if (!sizing.ok) {
+          await markSkipped(sizing.reason)
           entryResults.push({ symbol: alert.symbol, outcome: `skipped: ${sizing.reason}` })
           continue
         }
@@ -245,6 +261,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           entryResults.push({ symbol: alert.symbol, outcome: `submitted: ${sizing.contracts}x @ $${entryPrice} (strike $${strikePrice})` })
           await sendToTopic(ALERTS_TOPIC, `Swing entry: ${alert.symbol}`, `${sizing.contracts}x $${strikePrice}C exp ${alert.expiration_date}, limit $${entryPrice}`)
         } catch (error) {
+          await markSkipped(`order failed: ${describeAlpacaError(error)}`)
           entryResults.push({ symbol: alert.symbol, outcome: `order failed: ${describeAlpacaError(error)}` })
         }
       }
