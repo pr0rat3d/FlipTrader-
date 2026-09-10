@@ -52,5 +52,10 @@ export const optionClientOrderIds = (profitTargetId: string) => ({
 // unlikely.
 export const swingClientOrderIds = (alertId: string) => ({
   entry: `sw-entry-${alertId}`,
-  exit: (attempt: number) => `sw-exit${attempt}-${alertId}`
+  // Exit is now a marketable limit that gets cancelled and retried (fresh
+  // price, fresh id) whenever it doesn't fill immediately - same
+  // "timestamp, no natural sequence number" reasoning as stopHeal/
+  // stopRestore above, since a cancelled id can't be reused (Alpaca's
+  // client_order_id uniqueness applies even to already-cancelled orders).
+  exit: () => `sw-exit-${Date.now()}-${alertId}`
 })

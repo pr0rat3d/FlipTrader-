@@ -2,7 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { isMarketOpen } from '../../server/marketHours.js'
-import { getAccount, getOrder, getOptionQuote, getBars5Min, placeOrder, describeAlpacaError } from '../../server/execution/alpacaClient.js'
+import { getAccount, getOrder, getOptionQuote, getBars5Min, placeOrder, cancelOrder, describeAlpacaError } from '../../server/execution/alpacaClient.js'
 import { computeSwingContractCount, MIN_CONTRACTS, MAX_POSITION_DOLLARS, PROFIT_TARGET_PCT, STOP_LOSS_PCT, DAYS_TO_EXPIRY_FORCE_CLOSE } from '../../server/execution/swingPositionSizing.js'
 import { swingClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import { selectSwingStrike } from '../../server/swingOptionSelection.js'
@@ -23,6 +23,21 @@ export const config = {
 // since swing pricing doesn't need 0DTE-grade freshness, but still a real
 // cutoff, not none at all.
 const STALENESS_CUTOFF_MINUTES = 90
+
+// Confirmed live 2026-09-10: a market sell on a thin swing contract (COST
+// $980C, effectively no volume since entry) filled at $0.01 against a
+// stop trigger that had read the bid at $0.25 moments earlier - the
+// underlying hadn't even moved against the position. A market order has no
+// floor, so on an empty book it fills at whatever price is resting, however
+// far from the last real quote. Exits now place a marketable LIMIT at the
+// just-read bid instead (same floor logic as entries' liquidity-aware
+// pricing) and poll briefly for the fill - bounds the worst case to "no
+// worse than the price that triggered the close" instead of "whatever the
+// book has."
+const EXIT_FILL_POLL_ATTEMPTS = 5
+const EXIT_FILL_POLL_DELAY_MS = 500
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 // Real swing execution (2026-08-25) - CALL/oversold signals ONLY, per user
 // decision after scripts/swingBacktestRun.ts showed PUT/overbought signals
@@ -101,27 +116,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       try {
         const ids = swingClientOrderIds(position.id)
-        await placeOrder({
+        const order = await placeOrder({
           symbol: position.option_symbol,
           qty: position.contracts,
           side: 'sell',
-          type: 'market',
+          type: 'limit',
           timeInForce: 'day',
-          clientOrderId: ids.exit(1)
+          limitPrice: quote.bid,
+          clientOrderId: ids.exit()
         }, 'swing')
 
-        await supabase.from('swing_positions').update({
-          status: closeReason,
-          exit_price: quote.bid,
-          closed_at: now.toISOString()
-        }).eq('id', position.id)
+        let filled = order.status === 'filled' ? order : null
+        for (let attempt = 0; !filled && attempt < EXIT_FILL_POLL_ATTEMPTS; attempt++) {
+          await sleep(EXIT_FILL_POLL_DELAY_MS)
+          const polled = await getOrder(order.id, 'swing')
+          if (polled?.status === 'filled') filled = polled
+          else if (polled && ['canceled', 'expired', 'rejected'].includes(polled.status)) break
+        }
 
-        closedCount++
-        await sendToTopic(
-          ALERTS_TOPIC,
-          `Swing exit: ${position.underlying_symbol}`,
-          `${closeReason.replace('closed_', '')} at ${(pctMove * 100).toFixed(1)}% (${daysToExpiry}d to expiry)`
-        )
+        if (filled) {
+          const fillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : quote.bid
+          await supabase.from('swing_positions').update({
+            status: closeReason,
+            exit_price: fillPrice,
+            exit_order_id: order.id,
+            closed_at: now.toISOString()
+          }).eq('id', position.id)
+
+          closedCount++
+          await sendToTopic(
+            ALERTS_TOPIC,
+            `Swing exit: ${position.underlying_symbol}`,
+            `${closeReason.replace('closed_', '')} at ${(pctMove * 100).toFixed(1)}% (${daysToExpiry}d to expiry)`
+          )
+        } else {
+          // Didn't fill against the bid within the poll window (or came
+          // back canceled/expired/rejected on its own) - cancel any
+          // remainder so nothing's left resting, and leave the position as
+          // 'open' untouched. Next invocation re-evaluates against a fresh
+          // quote and retries with a fresh client_order_id, rather than
+          // chasing a stale limit price across cycles.
+          await cancelOrder(order.id, 'swing')
+        }
       } catch (error) {
         await supabase.from('swing_positions').update({
           needs_manual_review: true,
