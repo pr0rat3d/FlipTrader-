@@ -2,6 +2,8 @@ import { supabase } from './supabaseAdmin.js'
 import { nyDateKey } from './marketHours.js'
 import { getAvailableExpirations, listOptionContractsNear, getOptionQuote } from './execution/alpacaClient.js'
 import { makeInHouseBlackScholesProvider, GreeksProvider, OptionType } from './optionsGreeks.js'
+import { getCommodityTrend, getSectorCommodityProxy } from './macroConditions.js'
+import { getUpcomingMacroEvents } from './economicCalendar.js'
 
 // Swappable provider (see optionsGreeks.ts's GreeksProvider docstring) - the
 // only implementation today wraps a real Alpaca quote + in-house
@@ -221,12 +223,34 @@ export interface SwingOpportunity {
   rationale: string
 }
 
+// Informational-only macro context appended to the rationale text - commodity
+// trend for the symbol's sector proxy (if one exists) plus any FOMC/CPI/OPEX
+// event within the lookahead window. Deliberately not used to gate/suppress
+// anything yet (see macroConditions.ts's Phase B note) - purely so every
+// alert is auditable against macro conditions from day one.
+const MACRO_NOTE_LOOKAHEAD_DAYS = 5
+
+const buildMacroNote = async (sector: string): Promise<string | null> => {
+  const notes: string[] = []
+
+  const proxy = getSectorCommodityProxy(sector)
+  if (proxy) {
+    const trend = await getCommodityTrend(proxy)
+    if (trend) notes.push(`${proxy} ${trend}`)
+  }
+
+  const events = getUpcomingMacroEvents(MACRO_NOTE_LOOKAHEAD_DAYS)
+  if (events.length > 0) notes.push(events.map(e => `${e.type} ${e.daysAway}d`).join(', '))
+
+  return notes.length > 0 ? notes.join(', ') : null
+}
+
 // One-call orchestration for scan-swings.ts: expiration -> strike/Greeks ->
 // IV rank -> rationale text. Returns null if no tradable expiration/contract
 // was found at all (an illiquid symbol, or Alpaca has nothing listed) - the
 // caller still has a valid RSI-only alert to fall back on in that case.
 export const evaluateSwingOpportunity = async (
-  symbol: string, direction: 'bullish' | 'bearish', spotPrice: number, rsi: number
+  symbol: string, direction: 'bullish' | 'bearish', spotPrice: number, rsi: number, sector: string = 'other'
 ): Promise<SwingOpportunity | null> => {
   const contractType: OptionType = direction === 'bullish' ? 'call' : 'put'
   const expirationDate = await pickExpirationForSymbol(symbol, contractType)
@@ -237,9 +261,12 @@ export const evaluateSwingOpportunity = async (
 
   const ivRank = await computeIvRank(symbol, strike.iv)
   const ivPct = (strike.iv * 100).toFixed(0)
-  const rationale = direction === 'bullish'
+  const baseRationale = direction === 'bullish'
     ? `Oversold bounce (RSI ${rsi.toFixed(1)}) - IV ${ivPct}%${ivRank ? `, rank ${ivRank.rank.toFixed(0)}%` : ' (rank building history)'}, ${(strike.delta).toFixed(2)}Δ ${expirationDate} $${strike.strikePrice} call`
     : `Overbought pullback (RSI ${rsi.toFixed(1)}) - IV ${ivPct}%${ivRank ? `, rank ${ivRank.rank.toFixed(0)}%` : ' (rank building history)'}, ${(strike.delta).toFixed(2)}Δ ${expirationDate} $${strike.strikePrice} put`
+
+  const macroNote = await buildMacroNote(sector)
+  const rationale = macroNote ? `${baseRationale} | ${macroNote}` : baseRationale
 
   return { strike, ivRank, rationale }
 }

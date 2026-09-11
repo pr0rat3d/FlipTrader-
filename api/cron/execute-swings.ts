@@ -5,6 +5,7 @@ import { isMarketOpen } from '../../server/marketHours.js'
 import { getAccount, getOrder, getOptionQuote, getBars5Min, placeOrder, cancelOrder, describeAlpacaError } from '../../server/execution/alpacaClient.js'
 import { computeSwingContractCount, MIN_CONTRACTS, MAX_POSITION_DOLLARS, PROFIT_TARGET_PCT, STOP_LOSS_PCT, DAYS_TO_EXPIRY_FORCE_CLOSE } from '../../server/execution/swingPositionSizing.js'
 import { swingClientOrderIds } from '../../server/execution/clientOrderIds.js'
+import { isFomcDay, isCpiDay } from '../../server/economicCalendar.js'
 import { selectSwingStrike } from '../../server/swingOptionSelection.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
@@ -189,6 +190,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       const account = await getAccount('swing')
 
+      // Checked once per invocation, not per-alert - a fresh option entry on
+      // a scheduled binary-event day (Fed rate decision, CPI print) carries
+      // outsized gap/IV-crush risk that has nothing to do with the RSI signal
+      // itself. Blocks new entries only - never touches exits, and both
+      // dates come from the Fed's/BLS's own published calendars
+      // (economicCalendar.ts), not a fitted/backtested signal, so this is
+      // safe to ship without the backtest the fuzzier commodity-correlation
+      // idea still needs (see swingOptionSelection.ts's buildMacroNote).
+      const macroBlackout = isFomcDay() || isCpiDay()
+
       for (const alert of pending) {
         // Marked attempted regardless of outcome below (success or any
         // failure) - one shot per oversold episode, same as every other
@@ -205,6 +216,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         await supabase.from('swing_trade_alerts').update({ entry_attempted: true, entry_attempted_at: attemptedAt }).eq('id', alert.id)
         const markSkipped = (reason: string) =>
           supabase.from('swing_trade_alerts').update({ entry_skip_reason: reason }).eq('id', alert.id)
+
+        if (macroBlackout) {
+          await markSkipped('macro blackout: FOMC/CPI release today')
+          entryResults.push({ symbol: alert.symbol, outcome: 'skipped: macro blackout: FOMC/CPI release today' })
+          continue
+        }
 
         if (!account) {
           await markSkipped('swing account unavailable')

@@ -4,7 +4,7 @@ import { nyDateKey } from './marketHours.js'
 import { Candle } from './twelvedata.js'
 import { detectCandlestickPattern } from './candlestickPatterns.js'
 
-export type SnapshotCategory = 'day_trade' | 'swing'
+export type SnapshotCategory = 'day_trade' | 'swing' | 'macro'
 
 export interface SnapshotBarExtras {
   vwap?: number | null
@@ -56,17 +56,17 @@ export const recordSnapshot = async (
     timestamp: new Date()
   }
 
-  if (category === 'swing') {
-    // Swing bars are daily, but this cron re-scans every ~15 min - without this,
-    // a single still-forming daily bar would pile up dozens of near-identical
-    // snapshots. Keep one row per symbol per NY trading day, updated in place as
-    // the day progresses, instead of a fresh row every run.
+  if (category === 'swing' || category === 'macro') {
+    // Swing/macro bars are both daily, but their crons re-scan more often -
+    // without this, a single still-forming daily bar would pile up dozens of
+    // near-identical snapshots. Keep one row per symbol per NY trading day,
+    // updated in place as the day progresses, instead of a fresh row every run.
     const today = nyDateKey(new Date())
     const { data: existing } = await supabase
       .from('indicator_snapshots')
       .select('id, timestamp')
       .eq('symbol', symbol)
-      .eq('category', 'swing')
+      .eq('category', category)
       .order('timestamp', { ascending: false })
       .limit(1)
       .maybeSingle()

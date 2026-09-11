@@ -116,7 +116,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // crossed an RSI threshold - same cost shape as the original
         // RSI-only version, just with a real Alpaca options lookup added on
         // top for the (much smaller) set of symbols that qualify.
-        const opportunity = await evaluateSwingOpportunity(symbol, direction, spotPrice, currentRSI)
+        const opportunity = await evaluateSwingOpportunity(symbol, direction, spotPrice, currentRSI, sector)
         const ivRankValue = opportunity?.ivRank?.rank ?? null
         // Cold start (ivRankValue === null, not enough IV history yet) always
         // passes - proceed on RSI alone rather than go silent for ~20 trading
