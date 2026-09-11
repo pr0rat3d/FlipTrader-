@@ -11,6 +11,7 @@ import { pickBatch } from '../../server/batching.js'
 import { getSwingUniverse } from '../../server/swingUniverse.js'
 import { getDailyLevels } from '../../server/supportResistance.js'
 import { evaluateSwingOpportunity } from '../../server/swingOptionSelection.js'
+import { runMacroScan } from '../../server/macroScan.js'
 
 // Spec filter, applied only once a symbol's IV-rank has enough history to be
 // meaningful (see MIN_IV_HISTORY_FOR_RANK in swingOptionSelection.ts) - null
@@ -47,6 +48,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!isMarketOpen()) {
       return res.status(200).json({ success: true, skipped: true, reason: 'market closed' })
     }
+
+    // Folded in here rather than its own cron (see macroScan.ts's comment) -
+    // independent of the symbol batch below, so it runs every invocation;
+    // its own once-per-day dedup means this is a no-op past the first
+    // successful run of the day.
+    const macroScanResult = await runMacroScan()
 
     const { sectorPool, followedPool, sectorBySymbol } = await getSwingUniverse()
 
@@ -202,7 +209,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    res.status(200).json({ success: true, batch, oversoldAlerts })
+    res.status(200).json({ success: true, batch, oversoldAlerts, macroRecorded: macroScanResult.recorded })
   } catch (error) {
     console.error('Error in scan-swings:', error)
     res.status(500).json({ error: String(error) })
