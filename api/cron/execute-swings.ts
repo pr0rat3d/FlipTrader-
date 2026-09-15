@@ -84,7 +84,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         await supabase.from('swing_positions').update({ status: 'open', premium_entry: fillPrice }).eq('id', position.id)
         reconciled++
       } else if (order && ['canceled', 'expired', 'rejected'].includes(order.status)) {
-        await supabase.from('swing_positions').update({ status: 'entry_failed', closed_at: new Date().toISOString() }).eq('id', position.id)
+        await supabase.from('swing_positions').update({
+          status: 'entry_failed', closed_at: new Date().toISOString(),
+          review_reason: `entry order ${order.status}, never filled at limit $${position.premium_entry}`
+        }).eq('id', position.id)
         reconciled++
       }
       // else: still resting - nothing to do, day-TIF order will fill,
