@@ -57,5 +57,11 @@ export const swingClientOrderIds = (alertId: string) => ({
   // "timestamp, no natural sequence number" reasoning as stopHeal/
   // stopRestore above, since a cancelled id can't be reused (Alpaca's
   // client_order_id uniqueness applies even to already-cancelled orders).
-  exit: () => `sw-exit-${Date.now()}-${alertId}`
+  exit: () => `sw-exit-${Date.now()}-${alertId}`,
+  // Broker-side stop (2026-09-19), placed once at entry fill. A day-TIF
+  // options stop expires at the close each night, so it needs re-arming
+  // every trading day a swing position stays open - a raw timestamp, not
+  // an attempt counter, since there's no natural bound on how many times
+  // that can happen over a multi-day hold.
+  stopPlace: () => `sw-stopplace-${Date.now()}-${alertId}`
 })

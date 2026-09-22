@@ -2,7 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
 import { isMarketOpen } from '../../server/marketHours.js'
-import { getAccount, getOrder, getOptionQuote, getBars5Min, placeOrder, cancelOrder, describeAlpacaError } from '../../server/execution/alpacaClient.js'
+import { getAccount, getOrder, getOpenOrders, getOptionQuote, getBars5Min, placeOrder, cancelOrder, describeAlpacaError } from '../../server/execution/alpacaClient.js'
 import { computeSwingContractCount, MIN_CONTRACTS, MAX_POSITION_DOLLARS, PROFIT_TARGET_PCT, STOP_LOSS_PCT, DAYS_TO_EXPIRY_FORCE_CLOSE } from '../../server/execution/swingPositionSizing.js'
 import { swingClientOrderIds } from '../../server/execution/clientOrderIds.js'
 import { isFomcDay, isCpiDay } from '../../server/economicCalendar.js'
@@ -73,7 +73,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // --- Reconcile entry fills ---
     const { data: submitted } = await supabase
       .from('swing_positions')
-      .select('id, entry_order_id, premium_entry')
+      .select('id, underlying_symbol, option_symbol, entry_order_id, premium_entry, contracts')
       .eq('status', 'entry_submitted')
 
     for (const position of submitted ?? []) {
@@ -81,7 +81,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const order = await getOrder(position.entry_order_id, 'swing')
       if (order?.status === 'filled') {
         const fillPrice = order.filled_avg_price ? parseFloat(order.filled_avg_price) : position.premium_entry
-        await supabase.from('swing_positions').update({ status: 'open', premium_entry: fillPrice }).eq('id', position.id)
+
+        // Broker-side stop, placed immediately on fill (2026-09-19) - same
+        // reasoning as option_positions' stop_order_id (migration 019):
+        // protection now runs on Alpaca's own matching engine instead of
+        // depending on the next invocation of this cron noticing in time.
+        // Found live that the old poll-and-sell approach (quote.bid checked
+        // only whenever this cron happened to run, ~15-75min apart) let
+        // thin-liquidity contracts (COST, UNP) run 67-90% down before the
+        // bot ever caught the 50% STOP_LOSS_PCT breach.
+        const stopIds = swingClientOrderIds(position.id)
+        const stopPrice = fillPrice * (1 - STOP_LOSS_PCT)
+        let stopOrderId: string | null = null
+        let stopPlacementError: string | null = null
+        try {
+          const stopOrder = await placeOrder({
+            symbol: position.option_symbol, qty: position.contracts, side: 'sell', type: 'stop',
+            stopPrice, timeInForce: 'day', clientOrderId: stopIds.stopPlace()
+          }, 'swing')
+          stopOrderId = stopOrder.id
+        } catch (e) {
+          stopPlacementError = describeAlpacaError(e)
+        }
+
+        await supabase.from('swing_positions').update({
+          status: 'open',
+          premium_entry: fillPrice,
+          stop_order_id: stopOrderId,
+          // A fill with no protective stop is naked - flag it loudly rather
+          // than let it look like any other open position (same reasoning
+          // as execute-alerts.ts's identical check on the day-trade side).
+          needs_manual_review: stopOrderId === null,
+          review_reason: stopOrderId === null ? `entry filled but protective stop order failed to place: ${stopPlacementError}` : null
+        }).eq('id', position.id)
+        if (stopOrderId === null) {
+          await sendToTopic(ALERTS_TOPIC, `Swing bot: manual review (${position.underlying_symbol})`, `CRITICAL: ${position.option_symbol} filled but has NO protective stop - ${stopPlacementError}`)
+        }
         reconciled++
       } else if (order && ['canceled', 'expired', 'rejected'].includes(order.status)) {
         await supabase.from('swing_positions').update({
@@ -95,39 +130,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // --- Manage open positions against the single full-exit spec (+30%
-    // target / -35% stop / exit within 3 trading days of expiry - no tier
-    // ladder, swing sizes are too small to scale out of) ---
+    // target / -50% stop / exit within 3 trading days of expiry - no tier
+    // ladder, swing sizes are too small to scale out of). The stop itself
+    // is now a real resting order at the broker (placed on entry fill,
+    // migration 028) - this loop's job on the stop side is to keep that
+    // resting order honest (re-arm it if it's gone missing), not to detect
+    // the breach itself the way it used to.
     const { data: open } = await supabase
       .from('swing_positions')
-      .select('id, underlying_symbol, option_symbol, contracts, premium_entry, expiration_date')
+      .select('id, underlying_symbol, option_symbol, contracts, premium_entry, expiration_date, stop_order_id')
       .eq('status', 'open')
 
     const now = new Date()
 
-    for (const position of open ?? []) {
-      const quote = await getOptionQuote(position.option_symbol, 'swing')
-      if (!quote || quote.bid <= 0) continue
+    type OpenSwingPosition = { id: string; underlying_symbol: string; option_symbol: string; contracts: number; premium_entry: number; expiration_date: string; stop_order_id: string | null }
 
-      const pctMove = (quote.bid - position.premium_entry) / position.premium_entry
-      const daysToExpiry = Math.round((new Date(position.expiration_date).getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
-
-      let closeReason: 'closed_target' | 'closed_stop' | 'closed_time_exit' | null = null
-      if (pctMove >= PROFIT_TARGET_PCT) closeReason = 'closed_target'
-      else if (pctMove <= -STOP_LOSS_PCT) closeReason = 'closed_stop'
-      else if (daysToExpiry <= DAYS_TO_EXPIRY_FORCE_CLOSE) closeReason = 'closed_time_exit'
-
-      if (!closeReason) continue
-
+    // Shared by both the "target/time-exit hit" path and the "stop already
+    // gapped through while unprotected" heal path - places a marketable
+    // limit at the just-read bid (not a market order: a thin-liquidity
+    // contract with no resting size can fill a bare market order far below
+    // the quote that triggered it, confirmed live 2026-09-10 on COST) and
+    // polls briefly for the fill.
+    const exitAtBid = async (
+      position: OpenSwingPosition, bid: number,
+      closeReason: 'closed_target' | 'closed_stop' | 'closed_time_exit', note: string
+    ): Promise<boolean> => {
+      const ids = swingClientOrderIds(position.id)
       try {
-        const ids = swingClientOrderIds(position.id)
         const order = await placeOrder({
-          symbol: position.option_symbol,
-          qty: position.contracts,
-          side: 'sell',
-          type: 'limit',
-          timeInForce: 'day',
-          limitPrice: quote.bid,
-          clientOrderId: ids.exit()
+          symbol: position.option_symbol, qty: position.contracts, side: 'sell',
+          type: 'limit', timeInForce: 'day', limitPrice: bid, clientOrderId: ids.exit()
         }, 'swing')
 
         let filled = order.status === 'filled' ? order : null
@@ -139,35 +171,172 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
 
         if (filled) {
-          const fillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : quote.bid
+          const fillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : bid
           await supabase.from('swing_positions').update({
-            status: closeReason,
-            exit_price: fillPrice,
-            exit_order_id: order.id,
-            closed_at: now.toISOString()
+            status: closeReason, exit_price: fillPrice, exit_order_id: order.id, closed_at: now.toISOString()
           }).eq('id', position.id)
-
-          closedCount++
-          await sendToTopic(
-            ALERTS_TOPIC,
-            `Swing exit: ${position.underlying_symbol}`,
-            `${closeReason.replace('closed_', '')} at ${(pctMove * 100).toFixed(1)}% (${daysToExpiry}d to expiry)`
-          )
-        } else {
-          // Didn't fill against the bid within the poll window (or came
-          // back canceled/expired/rejected on its own) - cancel any
-          // remainder so nothing's left resting, and leave the position as
-          // 'open' untouched. Next invocation re-evaluates against a fresh
-          // quote and retries with a fresh client_order_id, rather than
-          // chasing a stale limit price across cycles.
-          await cancelOrder(order.id, 'swing')
+          await sendToTopic(ALERTS_TOPIC, `Swing exit: ${position.underlying_symbol}`, note)
+          return true
         }
+
+        // Didn't fill against the bid within the poll window (or came back
+        // canceled/expired/rejected on its own) - cancel any remainder so
+        // nothing's left resting, and leave the position as 'open'
+        // untouched. Next invocation re-evaluates against a fresh quote and
+        // retries with a fresh client_order_id, rather than chasing a stale
+        // limit price across cycles.
+        await cancelOrder(order.id, 'swing')
+        return false
       } catch (error) {
         await supabase.from('swing_positions').update({
           needs_manual_review: true,
           review_reason: `exit order failed (${closeReason}): ${describeAlpacaError(error)}`
         }).eq('id', position.id)
         await sendToTopic(ALERTS_TOPIC, `Swing bot: manual review (${position.underlying_symbol})`, `Exit order failed - ${describeAlpacaError(error)}`)
+        return false
+      }
+    }
+
+    for (const position of (open ?? []) as OpenSwingPosition[]) {
+      // --- Keep the resting broker-side stop honest before anything else.
+      // A day-TIF options stop expires every night, so "no longer resting"
+      // is the EXPECTED state on the first check of every trading day a
+      // position stays open past one session - re-arming it here is
+      // routine, not an anomaly, unlike the day-trade bot's 0DTE stop
+      // (which lives and dies within a single session, so any cancellation
+      // there really is unexpected and worth flagging every time). Only a
+      // genuinely-unprotected gap - price already through the stop level,
+      // or the re-arm itself failing - gets flagged here; the routine
+      // nightly reroll does not, or every open swing position would flag
+      // for manual review every single morning.
+      const stopPrice = position.premium_entry * (1 - STOP_LOSS_PCT)
+      let stopStillResting = false
+
+      if (position.stop_order_id) {
+        const stopOrder = await getOrder(position.stop_order_id, 'swing')
+        if (stopOrder?.status === 'filled') {
+          const fillPrice = stopOrder.filled_avg_price ? parseFloat(stopOrder.filled_avg_price) : stopPrice
+          await supabase.from('swing_positions').update({
+            status: 'closed_stop', exit_price: fillPrice, exit_order_id: stopOrder.id, closed_at: now.toISOString()
+          }).eq('id', position.id)
+          closedCount++
+          await sendToTopic(ALERTS_TOPIC, `Swing exit: ${position.underlying_symbol}`, `stop (broker-side) at $${fillPrice.toFixed(2)}`)
+          continue
+        }
+        stopStillResting = !!stopOrder && !['canceled', 'expired', 'rejected'].includes(stopOrder.status)
+      }
+
+      if (!stopStillResting) {
+        // Race safety, same pattern monitor-executions.ts uses for the
+        // day-trade bot: a concurrent overlapping invocation may already be
+        // mid-way through replacing this exact stop - ask Alpaca directly
+        // before concluding there's really no protection.
+        const openOrders = await getOpenOrders(position.option_symbol, 'swing')
+        const replacementStop = openOrders?.find(o => o.type === 'stop' && o.side === 'sell') ?? null
+
+        if (replacementStop) {
+          if (replacementStop.id !== position.stop_order_id) {
+            position.stop_order_id = replacementStop.id
+            await supabase.from('swing_positions').update({ stop_order_id: replacementStop.id }).eq('id', position.id)
+          }
+        } else {
+          const gapQuote = await getOptionQuote(position.option_symbol, 'swing')
+
+          if (gapQuote && gapQuote.bid > 0 && gapQuote.bid <= stopPrice) {
+            // Already breached by the time we caught the gap (an overnight
+            // move most likely, since that's the only time the stop is
+            // reliably not resting) - a passive stop order priced above the
+            // current market is invalid, so flatten instead of placing one
+            // that would just get rejected.
+            const flattened = await exitAtBid(position, gapQuote.bid, 'closed_stop',
+              `stop gapped through while unprotected - flattened at $${gapQuote.bid.toFixed(2)} (intended stop $${stopPrice.toFixed(2)})`)
+            if (flattened) {
+              closedCount++
+              await sendToTopic(ALERTS_TOPIC, `Swing bot: manual review (${position.underlying_symbol})`,
+                `Protective stop was not resting and price had already breached $${stopPrice.toFixed(2)} - flattened at $${gapQuote.bid.toFixed(2)}`)
+              continue
+            }
+            // Flatten didn't fill either (thin book) - fall through and
+            // re-arm the stop below so it's not left fully naked either way.
+          }
+
+          const stopIds = swingClientOrderIds(position.id)
+          try {
+            const healedStop = await placeOrder({
+              symbol: position.option_symbol, qty: position.contracts, side: 'sell', type: 'stop',
+              stopPrice, timeInForce: 'day', clientOrderId: stopIds.stopPlace()
+            }, 'swing')
+            position.stop_order_id = healedStop.id
+            await supabase.from('swing_positions').update({ stop_order_id: healedStop.id }).eq('id', position.id)
+          } catch (e) {
+            await supabase.from('swing_positions').update({
+              needs_manual_review: true,
+              review_reason: `protective stop re-arm failed - position unprotected: ${describeAlpacaError(e)}`
+            }).eq('id', position.id)
+            await sendToTopic(ALERTS_TOPIC, `Swing bot: manual review (${position.underlying_symbol})`, `CRITICAL: protective stop re-arm failed - position unprotected - ${describeAlpacaError(e)}`)
+          }
+        }
+      }
+
+      // --- Target / time-exit: still a bot-polled bid check (no resting
+      // profit-target order - swing sizes don't warrant one), but the
+      // resting stop has to be cancelled first since Alpaca won't let the
+      // same contracts back a second resting sell order.
+      const quote = await getOptionQuote(position.option_symbol, 'swing')
+      if (!quote || quote.bid <= 0) continue
+
+      const pctMove = (quote.bid - position.premium_entry) / position.premium_entry
+      const daysToExpiry = Math.round((new Date(position.expiration_date).getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
+
+      let closeReason: 'closed_target' | 'closed_time_exit' | null = null
+      if (pctMove >= PROFIT_TARGET_PCT) closeReason = 'closed_target'
+      else if (daysToExpiry <= DAYS_TO_EXPIRY_FORCE_CLOSE) closeReason = 'closed_time_exit'
+
+      if (!closeReason) continue
+
+      const currentStopId = position.stop_order_id
+      if (currentStopId) {
+        const canceled = await cancelOrder(currentStopId, 'swing')
+        if (!canceled) {
+          // Could already be filled (thin window between the check above
+          // and now) - re-check rather than risk trying to sell contracts
+          // still committed to a live resting order.
+          const recheck = await getOrder(currentStopId, 'swing')
+          if (recheck?.status === 'filled') {
+            const fillPrice = recheck.filled_avg_price ? parseFloat(recheck.filled_avg_price) : stopPrice
+            await supabase.from('swing_positions').update({
+              status: 'closed_stop', exit_price: fillPrice, exit_order_id: recheck.id, closed_at: now.toISOString()
+            }).eq('id', position.id)
+            closedCount++
+            await sendToTopic(ALERTS_TOPIC, `Swing exit: ${position.underlying_symbol}`, `stop (broker-side) at $${fillPrice.toFixed(2)}`)
+            continue
+          }
+        }
+      }
+
+      const closed = await exitAtBid(position, quote.bid, closeReason,
+        `${closeReason.replace('closed_', '')} at ${(pctMove * 100).toFixed(1)}% (${daysToExpiry}d to expiry)`)
+
+      if (closed) {
+        closedCount++
+      } else if (currentStopId) {
+        // Exit didn't fill and the protective stop was already cancelled to
+        // make room for it - don't leave the position naked until the next
+        // invocation, put a stop back before moving on.
+        const stopIds = swingClientOrderIds(position.id)
+        try {
+          const restoredStop = await placeOrder({
+            symbol: position.option_symbol, qty: position.contracts, side: 'sell', type: 'stop',
+            stopPrice, timeInForce: 'day', clientOrderId: stopIds.stopPlace()
+          }, 'swing')
+          await supabase.from('swing_positions').update({ stop_order_id: restoredStop.id }).eq('id', position.id)
+        } catch (e) {
+          await supabase.from('swing_positions').update({
+            needs_manual_review: true,
+            review_reason: `stop cancelled to attempt a ${closeReason} sell, sell didn't fill, AND restoring the stop failed - position unprotected: ${describeAlpacaError(e)}`
+          }).eq('id', position.id)
+          await sendToTopic(ALERTS_TOPIC, `Swing bot: manual review (${position.underlying_symbol})`, `CRITICAL: stop cancelled for exit attempt, exit failed, restore also failed - position unprotected - ${describeAlpacaError(e)}`)
+        }
       }
     }
 

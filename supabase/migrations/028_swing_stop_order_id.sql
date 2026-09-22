@@ -1,0 +1,13 @@
+-- Real broker-side stop for swings (2026-09-19): found live that the
+-- poll-and-sell stop check in execute-swings.ts (pctMove computed against
+-- quote.bid, only re-evaluated whenever this cron next happens to run,
+-- ~15-75min apart during market hours) let several positions run past the
+-- configured 50% STOP_LOSS_PCT before the bot ever noticed - COST closed at
+-- a 90.3% drawdown, UNP at 67.4%, both on thin-liquidity contracts where the
+-- bid can move a lot between polls. Mirrors migration 019's fix for the
+-- day-trade options bot: place a real resting stop order with Alpaca at
+-- entry-fill time so protection runs on the broker's own matching engine
+-- instead of depending on the next cron poll. stop_order_id tracks which
+-- resting order is currently protecting a position, same role as
+-- option_positions.stop_order_id.
+ALTER TABLE swing_positions ADD COLUMN stop_order_id TEXT;
