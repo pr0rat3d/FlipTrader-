@@ -153,6 +153,7 @@ export interface DailyLevel {
 export interface ExecutionSettings {
   id: number;
   is_enabled: boolean;
+  swing_enabled: boolean;
   min_confidence: number;
   risk_pct: number;
   min_qty: number;

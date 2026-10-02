@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useAuth } from '../hooks/useAuth'
-import { getUserPreferences, saveUserPreferences, getExecutionSettings, setExecutionEnabled } from '../lib/supabase'
+import { getUserPreferences, saveUserPreferences, getExecutionSettings, setExecutionEnabled, setSwingExecutionEnabled } from '../lib/supabase'
 import { Auth } from './Auth'
 
 const SECTORS = ['tech', 'healthcare', 'energy', 'financials', 'consumer', 'industrials', 'materials', 'utilities', 'real_estate', 'communications']
@@ -16,6 +16,9 @@ export const Settings: React.FC = () => {
   const [executionEnabled, setExecutionEnabledState] = useState(false)
   const [executionToggling, setExecutionToggling] = useState(false)
   const [executionError, setExecutionError] = useState<string | null>(null)
+  const [swingEnabled, setSwingEnabledState] = useState(false)
+  const [swingToggling, setSwingToggling] = useState(false)
+  const [swingError, setSwingError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!user) {
@@ -40,7 +43,10 @@ export const Settings: React.FC = () => {
     loadPreferences()
 
     getExecutionSettings()
-      .then(settings => setExecutionEnabledState(settings.is_enabled))
+      .then(settings => {
+        setExecutionEnabledState(settings.is_enabled)
+        setSwingEnabledState(settings.swing_enabled === true)
+      })
       .catch(error => console.error('Error loading execution settings:', error))
   }, [user])
 
@@ -56,6 +62,21 @@ export const Settings: React.FC = () => {
       setExecutionError(error instanceof Error ? error.message : String(error))
     } finally {
       setExecutionToggling(false)
+    }
+  }
+
+  const handleToggleSwing = async () => {
+    const next = !swingEnabled
+    setSwingToggling(true)
+    setSwingError(null)
+    try {
+      await setSwingExecutionEnabled(next)
+      setSwingEnabledState(next)
+    } catch (error) {
+      console.error('Error updating swing execution setting:', error)
+      setSwingError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSwingToggling(false)
     }
   }
 
@@ -134,6 +155,26 @@ export const Settings: React.FC = () => {
               {executionEnabled ? 'Enabled' : 'Disabled'}
             </label>
             {executionError && <p className="text-sm text-red-400 mt-2">Failed to update: {executionError}</p>}
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-lg font-bold text-white mb-3">Automated Swing Trading</h3>
+            <p className="text-xs text-gray-400 mb-3">
+              Separate from day trading above. When enabled, oversold CALL swing alerts are automatically
+              entered on the swing paper account. Turning this off only stops NEW entries - open swing
+              positions keep their stops and exits.
+            </p>
+            <label className="flex items-center text-white cursor-pointer">
+              <input
+                type="checkbox"
+                checked={swingEnabled}
+                disabled={swingToggling}
+                onChange={handleToggleSwing}
+                className="mr-2"
+              />
+              {swingEnabled ? 'Enabled' : 'Disabled'}
+            </label>
+            {swingError && <p className="text-sm text-red-400 mt-2">Failed to update: {swingError}</p>}
           </div>
 
           <div className="mb-6">

@@ -340,6 +340,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
+    // Kill switch (migration 029) - gates new entries only, everything
+    // above (fill reconciliation, stop upkeep, exits) still runs so an open
+    // position is never left unmanaged by flipping this off. Fails closed:
+    // a settings read error, or the column not existing yet because this
+    // deployed before the migration ran, both mean "no new entries."
+    // Pending alerts are left untouched (entry_attempted stays false) -
+    // the 90-minute staleness gate below already keeps them from being
+    // entered on old pricing if this is switched back on later.
+    const { data: settings, error: settingsError } = await supabase
+      .from('execution_settings')
+      .select('swing_enabled')
+      .eq('id', 1)
+      .single()
+    const swingEnabled = !settingsError && settings?.swing_enabled === true
+
+    if (!swingEnabled) {
+      return res.status(200).json({
+        success: true, reconciled, closed: closedCount, entriesAttempted: 0,
+        entriesSkipped: settingsError ? `swing execution settings unreadable: ${settingsError.message}` : 'swing execution disabled'
+      })
+    }
+
     // --- New entries: claims entry_attempted=false CALL alerts, sizes via
     // swingPositionSizing.ts, places a LIMIT order at the already-computed
     // ideal_entry_price (not market - defeats the point of the liquidity-
