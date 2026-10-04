@@ -27,7 +27,12 @@ const toCandle = (b: AlpacaBar): Candle => ({
   open: b.o, high: b.h, low: b.l, close: b.c, volume: b.v, datetime: b.t
 })
 
-const fetchAllBars = async (symbol: string, timeframe: string, start: string, end: string): Promise<AlpacaBar[]> => {
+// adjustment: 'raw' (default, what every existing backtest was built on) or
+// 'all' (split + dividend adjusted) - multi-year daily studies need 'all', a
+// raw split shows up as a fake -50%+ one-day crash.
+export type BarAdjustment = 'raw' | 'split' | 'dividend' | 'all'
+
+const fetchAllBars = async (symbol: string, timeframe: string, start: string, end: string, adjustment: BarAdjustment = 'raw'): Promise<AlpacaBar[]> => {
   let all: AlpacaBar[] = []
   let pageToken: string | undefined
 
@@ -46,7 +51,7 @@ const fetchAllBars = async (symbol: string, timeframe: string, start: string, en
     // (RSI divergence, MACD crosses, daily trend) - fine for this backtest's
     // purpose even if not perfectly tick-complete.
     url.searchParams.set('feed', 'iex')
-    url.searchParams.set('adjustment', 'raw')
+    url.searchParams.set('adjustment', adjustment)
     if (pageToken) url.searchParams.set('page_token', pageToken)
 
     const res = await fetch(url.toString(), { headers: headers() })
@@ -64,5 +69,5 @@ const fetchAllBars = async (symbol: string, timeframe: string, start: string, en
 export const fetchIntradayHistory = async (symbol: string, start: string, end: string): Promise<Candle[]> =>
   (await fetchAllBars(symbol, '5Min', start, end)).map(toCandle)
 
-export const fetchDailyHistory = async (symbol: string, start: string, end: string): Promise<Candle[]> =>
-  (await fetchAllBars(symbol, '1Day', start, end)).map(toCandle)
+export const fetchDailyHistory = async (symbol: string, start: string, end: string, adjustment: BarAdjustment = 'raw'): Promise<Candle[]> =>
+  (await fetchAllBars(symbol, '1Day', start, end, adjustment)).map(toCandle)
