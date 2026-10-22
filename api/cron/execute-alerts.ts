@@ -1,6 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordCronRun } from '../../server/cronHeartbeat.js'
 import { isMarketOpen, hasSessionClosedSince, nyDateKey } from '../../server/marketHours.js'
 import { getAccount, placeOrder, getOrder, findOptionContract, getOptionQuote, describeAlpacaError } from '../../server/execution/alpacaClient.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
@@ -264,6 +265,7 @@ interface OpenLeg {
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
+  await recordCronRun(req)
 
   try {
     const { data: settingsRow, error: settingsError } = await supabase

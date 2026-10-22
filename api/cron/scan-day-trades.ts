@@ -3,6 +3,7 @@ import { supabase } from '../../server/supabaseAdmin.js'
 import { getIntradayCandles } from '../../server/twelvedata.js'
 import { isMarketOpen } from '../../server/marketHours.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordCronRun } from '../../server/cronHeartbeat.js'
 import { recordSnapshot } from '../../server/snapshot.js'
 import { calculateSessionVWAP } from '../../server/vwap.js'
 import { pickBatch } from '../../server/batching.js'
@@ -20,6 +21,7 @@ const BATCH_INTERVAL_MIN = 5
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
+  await recordCronRun(req)
 
   try {
     if (!isMarketOpen()) {

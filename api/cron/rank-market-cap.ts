@@ -1,5 +1,6 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordCronRun } from '../../server/cronHeartbeat.js'
 import { advanceRankingCycle } from '../../server/marketCapRanking.js'
 
 export const config = {
@@ -23,6 +24,7 @@ export const config = {
 // no-op cost.
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
+  await recordCronRun(req)
 
   try {
     const result = await advanceRankingCycle()

@@ -1,6 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordCronRun } from '../../server/cronHeartbeat.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { getOrder, getOpenOrders, placeOrder, cancelOrder, getOptionQuote, describeAlpacaError } from '../../server/execution/alpacaClient.js'
@@ -698,6 +699,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
+  await recordCronRun(req)
 
   try {
     let totalManaged = 0

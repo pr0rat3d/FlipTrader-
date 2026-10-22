@@ -6,6 +6,7 @@ import { isMarketOpen } from '../../server/marketHours.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordCronRun } from '../../server/cronHeartbeat.js'
 import { recordSnapshot } from '../../server/snapshot.js'
 import { pickBatch } from '../../server/batching.js'
 import { getSwingUniverse } from '../../server/swingUniverse.js'
@@ -39,6 +40,7 @@ const BATCH_INTERVAL_MIN = 15
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
+  await recordCronRun(req)
 
   try {
     // Daily-interval data only updates once/day (see comment above) - without

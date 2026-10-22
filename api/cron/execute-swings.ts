@@ -1,6 +1,7 @@
 import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordCronRun } from '../../server/cronHeartbeat.js'
 import { isMarketOpen } from '../../server/marketHours.js'
 import { getAccount, getOrder, getOpenOrders, getOptionQuote, getBars5Min, placeOrder, cancelOrder, describeAlpacaError } from '../../server/execution/alpacaClient.js'
 import { computeSwingContractCount, MIN_CONTRACTS, MAX_POSITION_DOLLARS, PROFIT_TARGET_PCT, STOP_LOSS_PCT, DAYS_TO_EXPIRY_FORCE_CLOSE } from '../../server/execution/swingPositionSizing.js'
@@ -61,6 +62,7 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // first place.
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
+  await recordCronRun(req)
 
   try {
     if (!isMarketOpen()) {

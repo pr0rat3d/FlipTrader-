@@ -6,6 +6,7 @@ import { isMarketOpen } from '../../server/marketHours.js'
 import { sendToTopic } from '../../server/firebase-notify.js'
 import { ALERTS_TOPIC } from '../register-token.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordCronRun } from '../../server/cronHeartbeat.js'
 import { calculateATR } from '../../src/lib/technicalIndicators.js'
 import { deriveMilestonePrices } from '../../server/alertOutcomes.js'
 import { getSupportResistanceLevels } from '../../server/supportResistance.js'
@@ -44,6 +45,7 @@ const stopLossFor = (direction: 'bullish' | 'bearish', entryPrice: number, atr: 
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
+  await recordCronRun(req)
 
   try {
     if (!isMarketOpen()) {

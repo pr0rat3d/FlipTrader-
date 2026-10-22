@@ -2,6 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node'
 import { supabase } from '../../server/supabaseAdmin.js'
 import { getQuote } from '../../server/finnhub.js'
 import { verifyCronSecret } from '../../server/verifyCronSecret.js'
+import { recordCronRun } from '../../server/cronHeartbeat.js'
 import { applyPriceSample, checkExpiry } from '../../server/alertOutcomes.js'
 
 // cron-job.org's free tier has no sub-minute scheduling option, so this still gets
@@ -85,6 +86,7 @@ const checkOpenTargets = async (): Promise<{ hit: number; expired: number; stopp
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!verifyCronSecret(req, res)) return
+  await recordCronRun(req)
 
   try {
     let targetsHit = 0

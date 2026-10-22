@@ -1,0 +1,40 @@
+# Dead-man's switch for the trading bot. Runs outside Vercel and
+# cron-job.org on purpose - those are two of the things it's checking.
+# Fails (and GitHub emails a failed-run notification) when:
+#   - Supabase is unreachable (paused), or
+#   - during market hours, any required cron job hasn't run in 15 min
+#     (see cron_health() in supabase/migrations/030_cron_heartbeats.sql).
+# Polling Supabase every 15 min on weekdays also keeps the free-tier
+# project from auto-pausing for inactivity.
+name: Bot heartbeat
+
+on:
+  schedule:
+    # 13:00-20:45 UTC covers the 9:30-16:00 ET session in both EDT and EST;
+    # cron_health() decides whether the market is actually open.
+    - cron: '*/15 13-20 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check cron heartbeats
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          # Publishable (public, client-side) key - can only call cron_health().
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          body=$(curl -sS --fail-with-body --retry 2 --retry-delay 20 --max-time 30 \
+            -X POST "$SUPABASE_URL/rest/v1/rpc/cron_health" \
+            -H "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+            -H "Content-Type: application/json" -d '{}') || {
+            echo "::error::Supabase unreachable (paused?): $body"
+            exit 1
+          }
+          echo "$body" | jq .
+          if [ "$(echo "$body" | jq -r .ok)" != "true" ]; then
+            echo "::error::Stale cron jobs: $(echo "$body" | jq -r '.stale | join(", ")') - re-enable them in cron-job.org"
+            exit 1
+          fi
