@@ -324,6 +324,21 @@ const SCALPER_LADDER_PCTS: Record<number, number[]> = {
 const scalperLadderTierPlan = (contracts: number): TierSpec[] =>
   (SCALPER_LADDER_PCTS[contracts] ?? []).map((targetPct, i) => ({ tierNumber: i + 1, isRunner: false, targetPct }))
 
+// Scalper ladder with the last contract turned into a runner at 3+ contracts
+// (proposed 2026-10-26). The 10-23 live DIV trade (SPY/IWM 0DTE calls, 2
+// contracts each) fully exited at ~+20% within 2 min, then the contracts ran
+// to +55%/+90% within 10 min. 2 contracts stays fully scalper (a runner
+// there would be half the position); 3/4/5 sell their first 2/3/4 contracts
+// on the live 10/15/20/25% steps and hold the last one as the live-mechanics
+// runner (+100% target, +50% post-3pm lock, breakeven ratchet). NOT live -
+// opt-in via --tier-plan scalper-runner3.
+const scalperRunner3TierPlan = (contracts: number): TierSpec[] => {
+  const pcts = SCALPER_LADDER_PCTS[contracts] ?? []
+  if (contracts < 3) return scalperLadderTierPlan(contracts)
+  const fixed = pcts.slice(0, -1).map((targetPct, i) => ({ tierNumber: i + 1, isRunner: false, targetPct }))
+  return [...fixed, { tierNumber: RUNNER_TIER_NUMBER, isRunner: true, targetPct: RUNNER_TARGET_PCT }]
+}
+
 const parseArgs = () => {
   const args = process.argv.slice(2)
   const get = (flag: string): string | undefined => {
@@ -338,7 +353,7 @@ const parseArgs = () => {
     return d.toISOString().slice(0, 10)
   })()
   const hardStopPct = get('--hard-stop-pct')
-  const tierPlanArg = get('--tier-plan') // 'live' (default), 'fixed-ladder', 'hybrid-runner5', or 'scalper'
+  const tierPlanArg = get('--tier-plan') // 'live' (default), 'fixed-ladder', 'hybrid-runner5', 'scalper', or 'scalper-runner3'
   const maxDailyEntries = get('--max-daily-entries')
   const chopStart = get('--chop-start') // "HH:MM" ET, e.g. "10:00"
   const chopEnd = get('--chop-end')
@@ -375,6 +390,7 @@ const parseArgs = () => {
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
     : tierPlanArg === 'hybrid-runner5' ? hybridRunner5TierPlan
     : tierPlanArg === 'scalper' ? scalperLadderTierPlan
+    : tierPlanArg === 'scalper-runner3' ? scalperRunner3TierPlan
     : undefined
   return {
     start, end,
