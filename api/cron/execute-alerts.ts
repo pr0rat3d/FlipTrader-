@@ -99,7 +99,13 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
 // one (trader reviews the push notification and decides manually), so this
 // exclusion is permanent by intent, not a placeholder to reconsider once
 // backtested.
-const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF', 'TTTF', 'PBC', 'REM'])
+// DTTF added 2026-10-26: the biggest loser in the live-matched backtest
+// (hs15, cap5, only DIV/DTTF enabled) - -$1,615 over 90 days, -$2,866 over
+// 180 - and removing it entirely beat keeping it in both windows (DIV-only
+// -$283 vs -$1,395 at 90d, +$1,524 vs -$321 at 180d). Same shared-capital
+// lesson as ORB/IV above: full removal, not a tighter gate. Leaves DIV as
+// the only live type.
+const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF', 'TTTF', 'DTTF', 'PBC', 'REM'])
 
 // DIV trend-day gate, shipped 2026-07-23 after a real incident: 10 straight
 // bullish DIV entries fired into a genuine gap-down-and-continue morning
