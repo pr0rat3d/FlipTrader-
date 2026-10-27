@@ -6,7 +6,7 @@
 // Usage: npx tsx scripts/ttfBacktest.ts [--months 12] [--end 2026-10-23]
 //   [--logs backtest_in/ttf_human_logs.csv] [--match-variant B]
 //   [--skip-options] [--no-divergence-filter] [--macd-exit-before-target]
-//   [--require-rejection]
+//   [--require-rejection] [--rejection-window 2]  (window implies the filter)
 //   [--charts 10]
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { fetchMinuteHistory } from '../server/backtest/fetchHistory.js'
@@ -33,7 +33,8 @@ const parseArgs = () => {
     skipOptions: args.includes('--skip-options'),
     divergenceFilter: !args.includes('--no-divergence-filter'),
     macdExitBeforeTarget: args.includes('--macd-exit-before-target'),
-    requireRejection: args.includes('--require-rejection'),
+    requireRejection: args.includes('--require-rejection') || get('--rejection-window') !== undefined,
+    rejectionWindowBars: parseInt(get('--rejection-window') ?? '0', 10),
     charts: parseInt(get('--charts') ?? '10', 10)
   }
 }
@@ -65,7 +66,7 @@ const label = (v: Variant, start: number) => `${v} @ ${Math.floor(start / 60)}:$
 
 const main = async () => {
   const opts = parseArgs()
-  const cfg: TtfConfig = { ...DEFAULT_TTF_CONFIG, divergenceFilter: opts.divergenceFilter, macdExitBeforeTarget: opts.macdExitBeforeTarget, requireRejection: opts.requireRejection }
+  const cfg: TtfConfig = { ...DEFAULT_TTF_CONFIG, divergenceFilter: opts.divergenceFilter, macdExitBeforeTarget: opts.macdExitBeforeTarget, requireRejection: opts.requireRejection, rejectionWindowBars: opts.rejectionWindowBars }
   console.log(`TTF backtest ${opts.start}..${opts.end} (${opts.months} months)`)
 
   const series = new Map<string, SymbolSeries>()
@@ -119,7 +120,7 @@ const main = async () => {
     optionNote = `${filled}/${priced.length * 2} attempt-legs filled from real trade bars`
   }
 
-  const tag = `${opts.start}_to_${opts.end}${cfg.divergenceFilter ? '' : '_nodivfilter'}${cfg.macdExitBeforeTarget ? '_macdexitearly' : ''}${cfg.requireRejection ? '_rejection' : ''}`
+  const tag = `${opts.start}_to_${opts.end}${cfg.divergenceFilter ? '' : '_nodivfilter'}${cfg.macdExitBeforeTarget ? '_macdexitearly' : ''}${cfg.requireRejection ? `_rejection${cfg.rejectionWindowBars ? `_w${cfg.rejectionWindowBars}` : ''}` : ''}`
   const outDir = `backtest_out/ttf/${tag}`
   mkdirSync(`${outDir}/charts`, { recursive: true })
   writeFileSync(`${outDir}/attempts.csv`, attemptsCsv(priced, cfg.optionHaircuts))
@@ -147,7 +148,7 @@ const main = async () => {
     `- MACD curl: slope < 0 then >= ${-cfg.macdFlatEps} for 2 bars ("flat" = slope >= 0 - spec didn't define flat)`,
     `- MACD-flip exit applies ${cfg.macdExitBeforeTarget ? 'to the full position, before and after' : 'only AFTER'} the EMA50 half-off (spec lists it under "Remainder")`,
     `- Stops: % stop ${(cfg.stopPct * 100).toFixed(2)}% intrabar (filled at stop or worse open); B/C also exit on a 1m close beyond the entry trendline by > tolerance (next bar open). Variant A has no trendline, so % stop only. R uses the nearer stop.`,
-    `- Rejection filter (not in spec): ${cfg.requireRejection ? 'ON - a B/C line touch only counts if that bar closes back on the reversal side of the line in the trade direction' : 'off'}`,
+    `- Rejection filter (not in spec): ${cfg.requireRejection ? `ON - a B/C line touch only counts once a bar ${cfg.rejectionWindowBars ? `within ${cfg.rejectionWindowBars} bar(s) after the touch (or the touch bar itself)` : '(the touch bar itself)'} closes back on the reversal side of the line in the trade direction, line not broken in between; entry off that bar` : 'off'}`,
     `- Index-divergence filter: ${cfg.divergenceFilter ? 'ON' : 'OFF'}. Max ${cfg.maxAttemptsPerSymbolDay} attempts/symbol/day, one position per symbol at a time. No entries at/after 15:30; force exit 15:55.`,
     `- Entries fill at the next 1m bar open after the signal bar closes. EMA50 target = previous bar's EMA50(HA) value, touched by the real high/low.`,
     `- Options: 0DTE, strike = 1st/2nd $1 strike strictly OTM from the entry price, ${cfg.contractsPerTrade} contracts (half = 1). Entry = first option trade bar within ${cfg.optionMaxEntryDelayMin} min of the underlying entry (else no fill); each exit = next option bar at/after the 1m bar following the trigger. Haircut $${h.toFixed(2)}/share per side unless noted.`,

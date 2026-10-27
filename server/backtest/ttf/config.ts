@@ -24,6 +24,11 @@
 //    the line in the trade's direction (bullish: green candle closing above
 //    the line; bearish: red candle closing below it). Added after the 12-mo
 //    run showed C's losers were price GRINDING along the line, not rejecting.
+//  - rejectionWindowBars (opt-in, with requireRejection): the rejection
+//    candle may come up to N bars AFTER the touch instead of on it (entry
+//    fires on the rejection bar, off the touched line, if the line hasn't
+//    closed broken in between). Added because same-bar rejection dropped
+//    C's biggest winners, which turned a bar or two after the touch.
 export interface TtfConfig {
   rsiPeriod: number
   rsiOversold: number
@@ -36,6 +41,7 @@ export interface TtfConfig {
   macdExitBeforeTarget: boolean
   divergenceFilter: boolean
   requireRejection: boolean
+  rejectionWindowBars: number
   stopPct: number
   maxAttemptsPerSymbolDay: number
   lastEntryMinutes: number // ET minutes-since-midnight; no new entries at/after
@@ -57,6 +63,7 @@ export const DEFAULT_TTF_CONFIG: TtfConfig = {
   macdExitBeforeTarget: false,
   divergenceFilter: true,
   requireRejection: false,
+  rejectionWindowBars: 0,
   stopPct: 0.0025,
   maxAttemptsPerSymbolDay: 3,
   lastEntryMinutes: 15 * 60 + 30,

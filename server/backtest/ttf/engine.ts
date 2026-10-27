@@ -10,6 +10,8 @@ export interface DayFlags {
   start: number // global index of the session's first bar
   n: number
   minute: number[]
+  open: number[]
+  close: number[]
   ttf: Record<Direction, boolean[]> // instantaneous TTF (all three RSIs)
   curl: Record<Direction, boolean[]>
   touch: Record<Direction, boolean[]>
@@ -36,6 +38,8 @@ export const computeDayFlags = (s: SymbolSeries, start: number, end: number, cfg
   const flags: DayFlags = {
     symbol: s.symbol, day: s.bars[start].day, start, n,
     minute: s.bars.slice(start, end).map(b => b.minute),
+    open: s.bars.slice(start, end).map(b => b.open),
+    close: s.bars.slice(start, end).map(b => b.close),
     ttf: { bullish: mk(), bearish: mk() },
     curl: { bullish: mk(), bearish: mk() },
     touch: { bullish: mk(), bearish: mk() },
@@ -92,6 +96,7 @@ export interface RawSignal {
   minute: number
   direction: Direction
   variants: Variant[] // which variants' entry conditions passed on this bar
+  setupI: Partial<Record<Variant, number>> // bar whose line touch the trade is taken off (= i unless a delayed rejection confirmed it)
   indexCount: number
   divergenceBlocked: boolean
   conditions: { ttfActive: boolean; curl: boolean; touch: boolean; rejection: boolean; div: boolean }
@@ -107,16 +112,43 @@ export const conditionsAt = (f: DayFlags, dir: Direction, i: number, cfg: TtfCon
   div: f.div[dir][i]
 })
 
-const variantsPassing = (c: ReturnType<typeof conditionsAt>, cfg: TtfConfig): Variant[] => {
-  const out: Variant[] = []
-  if (c.ttfActive && c.curl) {
-    out.push('A')
-    if (c.touch && (!cfg.requireRejection || c.rejection)) {
-      out.push('B')
-      if (c.div) out.push('C')
-    }
+// Bar i is a rejection candle off `line`: closes on the reversal side of
+// it in the trade direction (bullish: green, above; bearish: red, below).
+const rejectsAt = (f: DayFlags, dir: Direction, line: Line, i: number) => {
+  const lv = f.engines[dir].lineValue(line, i)
+  return dir === 'bullish' ? f.close[i] > lv && f.close[i] > f.open[i] : f.close[i] < lv && f.close[i] < f.open[i]
+}
+
+// B/C trigger at bar i. Returns the setup bar (the line-touch bar) or null.
+// No rejection filter: the setup (TTF active + curl + touch [+ div]) on bar
+// i itself. With it: a setup on bar j in [i - rejectionWindowBars, i] whose
+// line hasn't closed broken since, where bar i is the FIRST rejection candle
+// off that line since j - so each setup fires at most once. Window 0 = the
+// touch bar itself must reject.
+export const touchSetupAt = (f: DayFlags, dir: Direction, i: number, cfg: TtfConfig, needDiv: boolean): number | null => {
+  const setup = (j: number) =>
+    f.touch[dir][j] && f.active[dir][j] !== null && f.curl[dir][j] && ttfActiveAt(f, dir, j, cfg.ttfActiveBars) && (!needDiv || f.div[dir][j])
+  if (!cfg.requireRejection) return setup(i) ? i : null
+  for (let j = i; j >= Math.max(0, i - cfg.rejectionWindowBars); j--) {
+    if (!setup(j)) continue
+    const line = f.active[dir][j]!
+    if (!rejectsAt(f, dir, line, i)) continue
+    let ok = true
+    for (let k = j; k < i && ok; k++) if (f.engines[dir].isBroken(line, k) || rejectsAt(f, dir, line, k)) ok = false
+    if (ok) return j
   }
-  return out
+  return null
+}
+
+const variantsPassing = (f: DayFlags, dir: Direction, i: number, c: ReturnType<typeof conditionsAt>, cfg: TtfConfig) => {
+  const variants: Variant[] = []
+  const setupI: Partial<Record<Variant, number>> = {}
+  if (c.ttfActive && c.curl) { variants.push('A'); setupI.A = i }
+  const jb = touchSetupAt(f, dir, i, cfg, false)
+  if (jb !== null) { variants.push('B'); setupI.B = jb }
+  const jc = touchSetupAt(f, dir, i, cfg, true)
+  if (jc !== null) { variants.push('C'); setupI.C = jc }
+  return { variants, setupI }
 }
 
 // All bars where at least variant A's conditions pass, across symbols of
@@ -129,7 +161,7 @@ export const rawSignalsForDay = (days: DayFlags[], cfg: TtfConfig, s: Map<string
     for (let i = 0; i < f.n; i++) {
       for (const dir of ['bullish', 'bearish'] as const) {
         const c = conditionsAt(f, dir, i, cfg)
-        const variants = variantsPassing(c, cfg)
+        const { variants, setupI } = variantsPassing(f, dir, i, c, cfg)
         if (!variants.length) continue
         const opp: Direction = dir === 'bullish' ? 'bearish' : 'bullish'
         let indexCount = 0
@@ -142,7 +174,7 @@ export const rawSignalsForDay = (days: DayFlags[], cfg: TtfConfig, s: Map<string
         })
         out.push({
           symbol: f.symbol, day: f.day, i, t: s.get(f.symbol)!.bars[f.start + i].t, minute: f.minute[i],
-          direction: dir, variants, indexCount, divergenceBlocked, conditions: c
+          direction: dir, variants, setupI, indexCount, divergenceBlocked, conditions: c
         })
       }
     }
@@ -219,7 +251,7 @@ const runTrade = (sig: RawSignal, f: DayFlags, s: SymbolSeries, e: number, varia
   const bar = (i: number) => s.bars[G(i)]
   const entry = bar(e).open
   const usesLine = variant !== 'A'
-  const line = usesLine ? f.active[sig.direction][sig.i] : null
+  const line = usesLine ? f.active[sig.direction][sig.setupI[variant] ?? sig.i] : null
   const eng = f.engines[sig.direction]
 
   const pctStop = entry * (1 - sg * cfg.stopPct)
