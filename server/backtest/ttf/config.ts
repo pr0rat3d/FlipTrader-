@@ -34,7 +34,7 @@
 //    the signal bar's close: 'open' = close vs today's 09:30 open;
 //    'prevclose' = close vs yesterday's last close; 'ema50slope' = EMA50(HA)
 //    now vs 15 bars ago; 'ema200' = close vs EMA200 of real 1m closes;
-//    'daily5' = yesterday's close vs the close 5 sessions before it (no
+//    'daily' = yesterday's close vs the close trendDays sessions before it (no
 //    intraday data at all - the intraday reads can't work for a reversal
 //    setup, since RSI>70 on 1/3/5m means price just ran up, so they read
 //    "up" at nearly every short signal).
@@ -53,6 +53,7 @@ export interface TtfConfig {
   requireRejection: boolean
   rejectionWindowBars: number
   trendFilter: TrendFilter
+  trendDays: number // lookback for trendFilter 'daily'
   stopPct: number
   maxAttemptsPerSymbolDay: number
   lastEntryMinutes: number // ET minutes-since-midnight; no new entries at/after
@@ -76,6 +77,7 @@ export const DEFAULT_TTF_CONFIG: TtfConfig = {
   requireRejection: false,
   rejectionWindowBars: 0,
   trendFilter: 'none',
+  trendDays: 5,
   stopPct: 0.0025,
   maxAttemptsPerSymbolDay: 3,
   lastEntryMinutes: 15 * 60 + 30,
@@ -85,8 +87,8 @@ export const DEFAULT_TTF_CONFIG: TtfConfig = {
   optionMaxEntryDelayMin: 3
 }
 
-export type TrendFilter = 'none' | 'open' | 'prevclose' | 'ema50slope' | 'ema200' | 'daily5'
-export const TREND_FILTERS: TrendFilter[] = ['none', 'open', 'prevclose', 'ema50slope', 'ema200', 'daily5']
+export type TrendFilter = 'none' | 'open' | 'prevclose' | 'ema50slope' | 'ema200' | 'daily'
+export const TREND_FILTERS: TrendFilter[] = ['none', 'open', 'prevclose', 'ema50slope', 'ema200', 'daily']
 
 export type Variant = 'A' | 'B' | 'C'
 export const VARIANTS: Variant[] = ['A', 'B', 'C']

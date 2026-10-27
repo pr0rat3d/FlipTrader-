@@ -176,7 +176,7 @@ export const rawSignalsForDay = (days: DayFlags[], cfg: TtfConfig, s: Map<string
         const ser = s.get(f.symbol)!
         out.push({
           symbol: f.symbol, day: f.day, i, t: ser.bars[f.start + i].t, minute: f.minute[i],
-          direction: dir, variants, setupI, indexCount, divergenceBlocked, trend: trendAt(f, ser, i, cfg.trendFilter), conditions: c
+          direction: dir, variants, setupI, indexCount, divergenceBlocked, trend: trendAt(f, ser, i, cfg.trendFilter, cfg.trendDays), conditions: c
         })
       }
     }
@@ -185,7 +185,7 @@ export const rawSignalsForDay = (days: DayFlags[], cfg: TtfConfig, s: Map<string
 }
 
 // Trend read at session-local bar i (sign only). See config.ts trendFilter.
-export const trendAt = (f: DayFlags, s: SymbolSeries, i: number, mode: TrendFilter): -1 | 0 | 1 => {
+export const trendAt = (f: DayFlags, s: SymbolSeries, i: number, mode: TrendFilter, days: number): -1 | 0 | 1 => {
   const g = f.start + i
   const close = s.bars[g].close
   let d: number
@@ -195,10 +195,12 @@ export const trendAt = (f: DayFlags, s: SymbolSeries, i: number, mode: TrendFilt
     case 'prevclose': if (f.start === 0) return 0; d = close - s.bars[f.start - 1].close; break
     case 'ema50slope': if (g < 15) return 0; d = s.ema50[g] - s.ema50[g - 15]; break
     case 'ema200': d = close - s.ema200[g]; break
-    case 'daily5': {
+    case 'daily': {
+      // Not enough prior sessions in the series (first days after the
+      // warm-up) -> no read, signal passes.
       const c = s.sessionCloses.get(f.day) ?? []
-      if (c.length < 6) return 0
-      d = c[c.length - 1] - c[c.length - 6]
+      if (c.length < days + 1) return 0
+      d = c[c.length - 1] - c[c.length - 1 - days]
       break
     }
   }
