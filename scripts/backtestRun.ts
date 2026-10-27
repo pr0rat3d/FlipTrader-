@@ -649,10 +649,12 @@ const main = async () => {
     position.status = 'closed'
     position.closedAtIso = timeIso
   }
-  const checkShareAtBar = (position: SimPosition, close: number, timeIso: string): boolean => {
+  // sessionEnd: the day-boundary sweep - close at the entry day's last bar,
+  // never hold a share trade overnight (same rule as the options positions).
+  const checkShareAtBar = (position: SimPosition, close: number, timeIso: string, sessionEnd: boolean): boolean => {
     const st = shareStateById.get(position.id)!
     const now = new Date(timeIso)
-    if (checkExpiry(new Date(st.leg.entryTimeIso), now) || nyDateKey(timeIso) !== nyDateKey(st.leg.entryTimeIso)) {
+    if (sessionEnd || checkExpiry(new Date(st.leg.entryTimeIso), now) || nyDateKey(timeIso) !== nyDateKey(st.leg.entryTimeIso)) {
       closeShare(position, close, timeIso, 'force_close')
       return true
     }
@@ -662,8 +664,8 @@ const main = async () => {
     if (st.leg.status === 'stopped_out') { closeShare(position, st.leg.stop_loss_price!, timeIso, 'hard_stop'); return true }
     return false
   }
-  const checkAnyPositionAtBar = (position: SimPosition, close: number, timeIso: string): boolean =>
-    shareStateById.has(position.id) ? checkShareAtBar(position, close, timeIso) : checkPositionAtBar(position, close, timeIso)
+  const checkAnyPositionAtBar = (position: SimPosition, close: number, timeIso: string, sessionEnd = false): boolean =>
+    shareStateById.has(position.id) ? checkShareAtBar(position, close, timeIso, sessionEnd) : checkPositionAtBar(position, close, timeIso)
 
   const applyFillEffects = (position: SimPosition, previousFillCount: number) => {
     if (shareStateById.has(position.id)) {
@@ -939,7 +941,7 @@ const main = async () => {
         const lastPrice = lastCloseBySymbol[position.symbol as Symbol]
         if (lastPrice === undefined) continue
         const prevFillCount = position.fills.length
-        const closed = checkAnyPositionAtBar(position, lastPrice, lastBarTimeIso)
+        const closed = checkAnyPositionAtBar(position, lastPrice, lastBarTimeIso, true)
         applyFillEffects(position, prevFillCount)
         if (closed) removeClosedPosition(position, lastBarTimeIso)
       }
@@ -956,7 +958,13 @@ const main = async () => {
       openLegsBySymbol[symbol] = openLegsBySymbol[symbol].filter(leg => {
         if (checkExpiry(new Date(leg.entryTimeIso), now)) {
           leg.status = 'expired'
-          recordShareOutcome(leg, close) // mark-to-market at the same-day cutoff, no fill assumption needed
+          // Fixed 2026-10-27: checkExpiry only turns true once the session has
+          // closed, i.e. on the NEXT day's first bar - marking at `close` here
+          // held every unresolved share trade overnight into the next
+          // morning's first 5-min close (~20% of DIV legs). Exit at the entry
+          // day's own last close instead (lastCloseBySymbol isn't updated for
+          // this bar until the end of the loop).
+          recordShareOutcome(leg, lastCloseBySymbol[symbol] ?? close)
           return false
         }
         const update = applyPriceSample(leg, leg.direction, close, now)
