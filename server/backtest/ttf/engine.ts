@@ -13,6 +13,7 @@ export interface DayFlags {
   ttf: Record<Direction, boolean[]> // instantaneous TTF (all three RSIs)
   curl: Record<Direction, boolean[]>
   touch: Record<Direction, boolean[]>
+  rejection: Record<Direction, boolean[]> // touch bar closed back on the reversal side of the line
   div: Record<Direction, boolean[]>
   active: Record<Direction, (Line | null)[]>
   engines: Record<Direction, TrendlineEngine>
@@ -38,6 +39,7 @@ export const computeDayFlags = (s: SymbolSeries, start: number, end: number, cfg
     ttf: { bullish: mk(), bearish: mk() },
     curl: { bullish: mk(), bearish: mk() },
     touch: { bullish: mk(), bearish: mk() },
+    rejection: { bullish: mk(), bearish: mk() },
     div: { bullish: mk(), bearish: mk() },
     active: { bullish: new Array(n).fill(null), bearish: new Array(n).fill(null) },
     engines: { bullish: new TrendlineEngine('bullish', tl), bearish: new TrendlineEngine('bearish', tl) },
@@ -60,6 +62,10 @@ export const computeDayFlags = (s: SymbolSeries, start: number, end: number, cfg
       eng.step({ t: b.t, high: b.high, low: b.low, close: b.close, atr: s.atr[g] })
       flags.active[dir][i] = eng.active
       flags.touch[dir][i] = eng.isTouch(i)
+      if (flags.touch[dir][i] && eng.active) {
+        const lv = eng.lineValue(eng.active, i)
+        flags.rejection[dir][i] = dir === 'bullish' ? b.close > lv && b.close > b.open : b.close < lv && b.close < b.open
+      }
       const sw = eng.swings
       if (sw.length >= 2) {
         const s1 = sw[sw.length - 2]
@@ -88,7 +94,7 @@ export interface RawSignal {
   variants: Variant[] // which variants' entry conditions passed on this bar
   indexCount: number
   divergenceBlocked: boolean
-  conditions: { ttfActive: boolean; curl: boolean; touch: boolean; div: boolean }
+  conditions: { ttfActive: boolean; curl: boolean; touch: boolean; rejection: boolean; div: boolean }
 }
 
 // Per-bar condition snapshot for a direction - also used by the human-log
@@ -97,14 +103,15 @@ export const conditionsAt = (f: DayFlags, dir: Direction, i: number, cfg: TtfCon
   ttfActive: ttfActiveAt(f, dir, i, cfg.ttfActiveBars),
   curl: f.curl[dir][i],
   touch: f.touch[dir][i],
+  rejection: f.rejection[dir][i],
   div: f.div[dir][i]
 })
 
-const variantsPassing = (c: ReturnType<typeof conditionsAt>): Variant[] => {
+const variantsPassing = (c: ReturnType<typeof conditionsAt>, cfg: TtfConfig): Variant[] => {
   const out: Variant[] = []
   if (c.ttfActive && c.curl) {
     out.push('A')
-    if (c.touch) {
+    if (c.touch && (!cfg.requireRejection || c.rejection)) {
       out.push('B')
       if (c.div) out.push('C')
     }
@@ -122,7 +129,7 @@ export const rawSignalsForDay = (days: DayFlags[], cfg: TtfConfig, s: Map<string
     for (let i = 0; i < f.n; i++) {
       for (const dir of ['bullish', 'bearish'] as const) {
         const c = conditionsAt(f, dir, i, cfg)
-        const variants = variantsPassing(c)
+        const variants = variantsPassing(c, cfg)
         if (!variants.length) continue
         const opp: Direction = dir === 'bullish' ? 'bearish' : 'bullish'
         let indexCount = 0

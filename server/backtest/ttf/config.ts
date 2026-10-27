@@ -19,6 +19,11 @@
 //    EMA50. true = it also exits the full position before that.
 //  - Variant A has no trendline, so its only stop is the % stop.
 //  - divergenceFilter (index-divergence skip) defaults ON.
+//  - requireRejection (2026-10-27, NOT in the spec - opt-in): a B/C line
+//    touch only counts if that same bar closes back on the reversal side of
+//    the line in the trade's direction (bullish: green candle closing above
+//    the line; bearish: red candle closing below it). Added after the 12-mo
+//    run showed C's losers were price GRINDING along the line, not rejecting.
 export interface TtfConfig {
   rsiPeriod: number
   rsiOversold: number
@@ -30,6 +35,7 @@ export interface TtfConfig {
   macdFlatEps: number
   macdExitBeforeTarget: boolean
   divergenceFilter: boolean
+  requireRejection: boolean
   stopPct: number
   maxAttemptsPerSymbolDay: number
   lastEntryMinutes: number // ET minutes-since-midnight; no new entries at/after
@@ -50,6 +56,7 @@ export const DEFAULT_TTF_CONFIG: TtfConfig = {
   macdFlatEps: 0,
   macdExitBeforeTarget: false,
   divergenceFilter: true,
+  requireRejection: false,
   stopPct: 0.0025,
   maxAttemptsPerSymbolDay: 3,
   lastEntryMinutes: 15 * 60 + 30,

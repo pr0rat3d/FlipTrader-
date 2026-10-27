@@ -79,8 +79,8 @@ export interface MatchRow {
   bestConditions: ReturnType<typeof conditionsAt> | null // at the bar where the most conditions passed
 }
 
-const variantPass = (c: ReturnType<typeof conditionsAt>, v: Variant) =>
-  c.ttfActive && c.curl && (v === 'A' || (c.touch && (v === 'B' || c.div)))
+const variantPass = (c: ReturnType<typeof conditionsAt>, v: Variant, cfg: TtfConfig) =>
+  c.ttfActive && c.curl && (v === 'A' || (c.touch && (!cfg.requireRejection || c.rejection) && (v === 'B' || c.div)))
 
 export const matchTrades = (
   trades: HumanTrade[], flagsFor: (symbol: string, day: string) => DayFlags | undefined,
@@ -97,9 +97,9 @@ export const matchTrades = (
     const i = center + off
     if (i < 0 || i >= f.n) continue
     const c = conditionsAt(f, trade.direction, i, cfg)
-    const score = Number(c.ttfActive) + Number(c.curl) + Number(c.touch) + Number(c.div)
+    const score = Number(c.ttfActive) + Number(c.curl) + Number(c.touch) + Number(c.rejection) + Number(c.div)
     if (score > bestScore) { bestScore = score; best = c }
-    if (variantPass(c, variant) && (nearest === null || Math.abs(off) < Math.abs(nearest))) nearest = off
+    if (variantPass(c, variant, cfg) && (nearest === null || Math.abs(off) < Math.abs(nearest))) nearest = off
   }
   return { trade, matched: nearest !== null, nearestOffset: nearest, bestConditions: best }
 })
