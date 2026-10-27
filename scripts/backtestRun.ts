@@ -68,7 +68,7 @@ import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, isIntradayVwapAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
 import { deriveMilestonePrices, applyPriceSample, checkExpiry, ProfitTargetRow } from '../server/alertOutcomes.js'
 import { nyDateKey } from '../server/marketHours.js'
-import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition, useRealPremiums } from '../server/backtest/optionPnlSimulator.js'
+import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition, SimulatedFill, useRealPremiums } from '../server/backtest/optionPnlSimulator.js'
 import { RealPremiumSource } from '../server/backtest/realOptionPremiums.js'
 import {
   MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, TierSpec,
@@ -393,6 +393,7 @@ const parseArgs = () => {
   const cciRequireVolumeConfirmationArg = args.includes('--cci-require-volume-confirmation') // 2026-08-23 - hard gate: reset bar's volume must be >=1.5x its trailing 20-bar average, isolated from the score threshold so it can be A/B tested on its own (same reasoning as --tttf-momentum-reset-gate). Off by default - volumePoints/volumeRatio are still computed and visible in the score either way.
   const strikeOtmOffsetArg = get('--strike-otm-offset') // e.g. "1" - dollars OUT of the money from the live ATM strike, ALL types. 2026-08-20: real incident where 3 same-second ATM 0DTE entries (SPY/QQQ/IWM DIV) all hard-stopped in 2-3min on <0.15% underlying moves - ATM 0DTE gamma amplifying chop, not a bug. Tests whether trading leverage for less gamma exposure nets out better.
   const realOptionsArg = args.includes('--real-options') // 2026-10-27: real historical 0DTE option trade prices instead of the Black-Scholes model (see server/backtest/realOptionPremiums.ts)
+  const shareExecutionArg = args.includes('--share-execution') // 2026-10-27: Phase 2 trades SHARES instead of options - every live entry gate still applies (confidence, dedup, momentum reset, cutoff, opposing close-all), but each entry is the signal's own Phase 1b share trade (flat $ risk, its target/stop/expiry) instead of an option position. No buying-power gate, same as Phase 1b.
   const fixedSizingArg = args.includes('--fixed-sizing') // 2026-10-27: size every entry off SIM_STARTING_EQUITY instead of the running balance. The compounding account hit ~$0 within months on the 24-month DIV run, after which buying power blocked every later entry - so any comparison over a long window just measured the path to ruin. Fixed sizing keeps every trade the same scale so variants compare trade-for-trade across the whole window.
   const optionHaircutArg = get('--option-haircut') // $/share per side when --real-options is on, default 0.02 (trade bars have no bid/ask)
   const divStrikeOtmOffsetArg = get('--div-strike-otm-offset') // e.g. "1" - same idea, scoped to DIV only (the type actually involved in the 08-20 incident) - everything else keeps the live ATM strike.
@@ -444,13 +445,14 @@ const parseArgs = () => {
     divStrikeOtmOffset: divStrikeOtmOffsetArg ? parseFloat(divStrikeOtmOffsetArg) : undefined,
     realOptions: realOptionsArg,
     fixedSizing: fixedSizingArg,
+    shareExecution: shareExecutionArg,
     optionHaircut: optionHaircutArg ? parseFloat(optionHaircutArg) : 0.02,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation, strikeOtmOffset, divStrikeOtmOffset, realOptions, optionHaircut, fixedSizing } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation, strikeOtmOffset, divStrikeOtmOffset, realOptions, optionHaircut, fixedSizing, shareExecution } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -475,6 +477,7 @@ const main = async () => {
   console.log(`Strike OTM offset (all types): ${strikeOtmOffset !== undefined ? `$${strikeOtmOffset} OTM` : 'off (live default: ATM)'}`)
   console.log(`Strike OTM offset (DIV only): ${divStrikeOtmOffset !== undefined ? `$${divStrikeOtmOffset} OTM` : 'off (live default: ATM)'}`)
   console.log(`Option premiums: ${realOptions ? `REAL Alpaca 0DTE trade bars, $${optionHaircut.toFixed(2)}/share haircut per side` : 'Black-Scholes model (default)'}`)
+  console.log(`Phase 2 instrument: ${shareExecution ? `SHARES ($${SHARE_MODE_RISK_DOLLARS} risk/trade, signal's own target/stop, all live entry gates)` : 'options (default)'}`)
   console.log(`Position sizing: ${fixedSizing ? `FIXED off $${SIM_STARTING_EQUITY} (no compounding)` : 'compounding running balance (default)'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
@@ -633,7 +636,40 @@ const main = async () => {
   // instant they actually happened, not all at once when a position fully
   // closes (a position can free capital across several tier fills over
   // time, same as live).
+  // --share-execution: per-position share trade state. The leg is a copy of
+  // the signal's own Phase 1 leg, resolved bar by bar the same way Phase 1
+  // resolves it (applyPriceSample / checkExpiry), so a gated share trade and
+  // its ungated Phase 1b twin exit identically.
+  const shareStateById = new Map<number, { leg: BacktestLeg; shares: number }>()
+  const closeShare = (position: SimPosition, exitPrice: number, timeIso: string, reason: SimulatedFill['reason']) => {
+    const st = shareStateById.get(position.id)!
+    position.fills.push({ atIso: timeIso, premium: exitPrice, contractsSold: position.remaining, reason })
+    position.realizedPnl = (position.direction === 'bullish' ? exitPrice - st.leg.entry_price : st.leg.entry_price - exitPrice) * st.shares
+    position.remaining = 0
+    position.status = 'closed'
+    position.closedAtIso = timeIso
+  }
+  const checkShareAtBar = (position: SimPosition, close: number, timeIso: string): boolean => {
+    const st = shareStateById.get(position.id)!
+    const now = new Date(timeIso)
+    if (checkExpiry(new Date(st.leg.entryTimeIso), now) || nyDateKey(timeIso) !== nyDateKey(st.leg.entryTimeIso)) {
+      closeShare(position, close, timeIso, 'force_close')
+      return true
+    }
+    const update = applyPriceSample(st.leg, st.leg.direction, close, now)
+    if (update) Object.assign(st.leg, update)
+    if (st.leg.status === 'target_hit') { closeShare(position, st.leg.target_50ema_price, timeIso, 'runner_target'); return true }
+    if (st.leg.status === 'stopped_out') { closeShare(position, st.leg.stop_loss_price!, timeIso, 'hard_stop'); return true }
+    return false
+  }
+  const checkAnyPositionAtBar = (position: SimPosition, close: number, timeIso: string): boolean =>
+    shareStateById.has(position.id) ? checkShareAtBar(position, close, timeIso) : checkPositionAtBar(position, close, timeIso)
+
   const applyFillEffects = (position: SimPosition, previousFillCount: number) => {
+    if (shareStateById.has(position.id)) {
+      if (position.fills.length > previousFillCount) simEquity += position.realizedPnl
+      return
+    }
     for (let i = previousFillCount; i < position.fills.length; i++) {
       const f = position.fills[i]
       committedCapital -= f.contractsSold * position.entryPremium * 100
@@ -823,9 +859,30 @@ const main = async () => {
       if (posGi === undefined) continue
       const posClose = intradayCandles[position.symbol as Symbol][posGi].close
       const prevFillCount = position.fills.length
-      closeOpposing(position, posClose, t)
+      if (shareStateById.has(position.id)) closeShare(position, posClose, t, 'opposing_close')
+      else closeOpposing(position, posClose, t)
       applyFillEffects(position, prevFillCount)
       removeClosedPosition(position, t)
+    }
+
+    if (shareExecution) {
+      // The signal's own Phase 1 leg, made just before this call for the same bar.
+      const leg = openLegsBySymbol[symbol].find(l => l.entryTimeIso === t && l.ttfStatus === ttfStatus && l.direction === direction)
+      if (!leg || leg.stop_loss_price === null) return skip('share_no_stop')
+      const riskPerShare = Math.abs(leg.entry_price - leg.stop_loss_price)
+      if (riskPerShare <= 0) return skip('share_no_stop')
+      const shares = SHARE_MODE_RISK_DOLLARS / riskPerShare
+      const position: SimPosition = {
+        id: nextPositionId++, ttfStatus, symbol, direction, contractType: direction === 'bullish' ? 'call' : 'put', strike: 0,
+        contracts: 1, remaining: 1, entryPremium: entryPrice, entryTimeIso: t, sigma: 0, stopPct: 0, tiers: [], filledTierCount: 0,
+        fills: [], status: 'open', closedAtIso: null, realizedPnl: 0
+      }
+      shareStateById.set(position.id, { leg: { ...leg }, shares })
+      openPositions.push(position)
+      openPositionBySymbolDirection.set(key, position)
+      entriesByDay.set(dayKey, (entriesByDay.get(dayKey) ?? 0) + 1)
+      peakConcurrentPositions = Math.max(peakConcurrentPositions, openPositions.length)
+      return
     }
 
     const volWindow = intradayCandles[symbol].slice(Math.max(0, globalIndex - VOL_WINDOW_BARS + 1), globalIndex + 1).map(c => c.close)
@@ -882,7 +939,7 @@ const main = async () => {
         const lastPrice = lastCloseBySymbol[position.symbol as Symbol]
         if (lastPrice === undefined) continue
         const prevFillCount = position.fills.length
-        const closed = checkPositionAtBar(position, lastPrice, lastBarTimeIso)
+        const closed = checkAnyPositionAtBar(position, lastPrice, lastBarTimeIso)
         applyFillEffects(position, prevFillCount)
         if (closed) removeClosedPosition(position, lastBarTimeIso)
       }
@@ -922,7 +979,7 @@ const main = async () => {
       for (const position of [...openPositions]) {
         if (position.symbol !== symbol) continue
         const prevFillCount = position.fills.length
-        const closed = checkPositionAtBar(position, close, t)
+        const closed = checkAnyPositionAtBar(position, close, t)
         applyFillEffects(position, prevFillCount)
         if (closed) removeClosedPosition(position, t)
       }
@@ -1413,7 +1470,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}${strikeOtmOffset !== undefined ? `_strikeotm${strikeOtmOffset}` : ''}${divStrikeOtmOffset !== undefined ? `_divstrikeotm${divStrikeOtmOffset}` : ''}${chopZoneStartMinutes !== undefined && chopZoneEndMinutes !== undefined ? `_chop${chopLabel.replace(/:/g, '')}` : ''}${realOptions ? `_realopt${Math.round(optionHaircut * 100)}` : ''}${fixedSizing ? '_fixed' : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}${strikeOtmOffset !== undefined ? `_strikeotm${strikeOtmOffset}` : ''}${divStrikeOtmOffset !== undefined ? `_divstrikeotm${divStrikeOtmOffset}` : ''}${chopZoneStartMinutes !== undefined && chopZoneEndMinutes !== undefined ? `_chop${chopLabel.replace(/:/g, '')}` : ''}${realOptions ? `_realopt${Math.round(optionHaircut * 100)}` : ''}${fixedSizing ? '_fixed' : ''}${shareExecution ? '_shares' : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
