@@ -396,6 +396,7 @@ const parseArgs = () => {
   const shareExecutionArg = args.includes('--share-execution') // 2026-10-27: Phase 2 trades SHARES instead of options - every live entry gate still applies (confidence, dedup, momentum reset, cutoff, opposing close-all), but each entry is the signal's own Phase 1b share trade (flat $ risk, its target/stop/expiry) instead of an option position. No buying-power gate, same as Phase 1b.
   const optionExitArg = get('--option-exit') // 2026-10-27: 'underlying' = hold the option until the UNDERLYING hits the signal's own target (50 EMA) or ATR stop, or the force-close cutoff - no premium ladder, no 25% premium stop. Default 'ladder' = live.
   const intrabarExitsArg = args.includes('--intrabar-exits') // 2026-10-27: share/underlying-level exits use each bar's high/low (stop checked first; a gap through a level fills at the bar's open) instead of only the 5-min close.
+  const optionDteArg = get('--option-dte') // 2026-10-27, with --real-options: contract expires N trading days after the trade date (default 0 = live 0DTE). Still an intraday trade - opened and force-closed the same day.
   const fixedSizingArg = args.includes('--fixed-sizing') // 2026-10-27: size every entry off SIM_STARTING_EQUITY instead of the running balance. The compounding account hit ~$0 within months on the 24-month DIV run, after which buying power blocked every later entry - so any comparison over a long window just measured the path to ruin. Fixed sizing keeps every trade the same scale so variants compare trade-for-trade across the whole window.
   const optionHaircutArg = get('--option-haircut') // $/share per side when --real-options is on, default 0.02 (trade bars have no bid/ask)
   const divStrikeOtmOffsetArg = get('--div-strike-otm-offset') // e.g. "1" - same idea, scoped to DIV only (the type actually involved in the 08-20 incident) - everything else keeps the live ATM strike.
@@ -449,6 +450,7 @@ const parseArgs = () => {
     fixedSizing: fixedSizingArg,
     shareExecution: shareExecutionArg,
     optionExitUnderlying: optionExitArg === 'underlying',
+    optionDte: optionDteArg ? parseInt(optionDteArg, 10) : 0,
     intrabarExits: intrabarExitsArg,
     optionHaircut: optionHaircutArg ? parseFloat(optionHaircutArg) : 0.02,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
@@ -456,7 +458,7 @@ const parseArgs = () => {
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation, strikeOtmOffset, divStrikeOtmOffset, realOptions, optionHaircut, fixedSizing, shareExecution, optionExitUnderlying, intrabarExits } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation, strikeOtmOffset, divStrikeOtmOffset, realOptions, optionHaircut, fixedSizing, shareExecution, optionExitUnderlying, intrabarExits, optionDte } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -482,6 +484,7 @@ const main = async () => {
   console.log(`Strike OTM offset (DIV only): ${divStrikeOtmOffset !== undefined ? `$${divStrikeOtmOffset} OTM` : 'off (live default: ATM)'}`)
   console.log(`Option premiums: ${realOptions ? `REAL Alpaca 0DTE trade bars, $${optionHaircut.toFixed(2)}/share haircut per side` : 'Black-Scholes model (default)'}`)
   console.log(`Phase 2 instrument: ${shareExecution ? `SHARES ($${SHARE_MODE_RISK_DOLLARS} risk/trade, signal's own target/stop, all live entry gates)` : 'options (default)'}`)
+  console.log(`Option expiry: ${optionDte === 0 ? '0DTE (live)' : `${optionDte} trading days out (held intraday only)`}`)
   console.log(`Option exits: ${optionExitUnderlying ? "UNDERLYING levels (signal's 50 EMA target / ATR stop / force close)" : 'premium ladder (live default)'}`)
   console.log(`Level exits checked on: ${intrabarExits ? 'bar high/low (stop first, gaps fill at the open)' : '5-min close (default)'}`)
   console.log(`Position sizing: ${fixedSizing ? `FIXED off $${SIM_STARTING_EQUITY} (no compounding)` : 'compounding running balance (default)'}`)
@@ -539,7 +542,21 @@ const main = async () => {
   // walk below can price synchronously.
   let realPremiumSource: RealPremiumSource | null = null
   if (realOptions) {
-    realPremiumSource = new RealPremiumSource(optionHaircut, 5)
+    // Trading-day calendar from SPY's own sessions; past the data's last day,
+    // weekdays (no holiday data there).
+    const sessionDays = [...new Set(intradayCandles.SPY.map(c => nyDateKey(c.datetime)))].sort()
+    const expiryFor = (day: string): string => {
+      if (optionDte === 0) return day
+      const i = sessionDays.indexOf(day)
+      if (i >= 0 && i + optionDte < sessionDays.length) return sessionDays[i + optionDte]
+      const d = new Date(`${sessionDays[sessionDays.length - 1] > day ? day : sessionDays[sessionDays.length - 1]}T12:00:00Z`)
+      let left = i >= 0 ? optionDte - (sessionDays.length - 1 - i) : optionDte
+      while (left > 0) { d.setUTCDate(d.getUTCDate() + 1); if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) left-- }
+      return d.toISOString().slice(0, 10)
+    }
+    realPremiumSource = optionDte === 0
+      ? new RealPremiumSource(optionHaircut, 5)
+      : new RealPremiumSource(optionHaircut, 5, expiryFor, 5, 5)
     const pad = 2 + Math.max(strikeOtmOffset ?? 0, divStrikeOtmOffset ?? 0)
     const jobs: Array<{ symbol: Symbol; day: string; strikes: number[] }> = []
     for (const symbol of SYMBOLS) {
@@ -1511,7 +1528,7 @@ const main = async () => {
   console.log(pnlRows.join('\n'))
 
   console.log(`\nTotal entries executed: ${executedPositions.length} | peak concurrent positions: ${peakConcurrentPositions}`)
-  if (realPremiumSource) console.log(`Real option entries: ${realPremiumSource.entriesFilled} filled, ${realPremiumSource.entriesNoTrade} skipped (no trade within 3 min of the signal)`)
+  if (realPremiumSource) console.log(`Real option entries: ${realPremiumSource.entriesFilled} filled, ${realPremiumSource.entriesNoTrade} skipped (no trade within the entry window)${realPremiumSource.missingContracts().length ? ` - ${realPremiumSource.missingContracts().length} contracts never loaded, e.g. ${realPremiumSource.missingContracts().slice(0, 3).join(', ')}` : ''}`)
   console.log(`Realized P&L: $${grandTotalPnl.toFixed(0)} | Final simulated equity: $${simEquity.toFixed(0)} (started at $${SIM_STARTING_EQUITY})`)
 
   console.log('\nEntries skipped by gate:')
@@ -1524,7 +1541,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}${strikeOtmOffset !== undefined ? `_strikeotm${strikeOtmOffset}` : ''}${divStrikeOtmOffset !== undefined ? `_divstrikeotm${divStrikeOtmOffset}` : ''}${chopZoneStartMinutes !== undefined && chopZoneEndMinutes !== undefined ? `_chop${chopLabel.replace(/:/g, '')}` : ''}${realOptions ? `_realopt${Math.round(optionHaircut * 100)}` : ''}${fixedSizing ? '_fixed' : ''}${shareExecution ? '_shares' : ''}${optionExitUnderlying ? '_uexit' : ''}${intrabarExits ? '_intrabar' : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}${strikeOtmOffset !== undefined ? `_strikeotm${strikeOtmOffset}` : ''}${divStrikeOtmOffset !== undefined ? `_divstrikeotm${divStrikeOtmOffset}` : ''}${chopZoneStartMinutes !== undefined && chopZoneEndMinutes !== undefined ? `_chop${chopLabel.replace(/:/g, '')}` : ''}${realOptions ? `_realopt${Math.round(optionHaircut * 100)}` : ''}${fixedSizing ? '_fixed' : ''}${shareExecution ? '_shares' : ''}${optionExitUnderlying ? '_uexit' : ''}${optionDte ? `_dte${optionDte}` : ''}${intrabarExits ? '_intrabar' : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`

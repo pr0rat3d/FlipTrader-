@@ -67,8 +67,20 @@ export class RealPremiumSource {
   entriesNoTrade = 0
 
   // barMinutes: the underlying bar size - `timeIso` passed in is a bar's
-  // START, and the bot acts on that bar's close.
-  constructor(readonly haircut: number, readonly barMinutes: number) {}
+  // START, and the bot acts on that bar's close. expiryFor: trade date ->
+  // the contract's expiration date (default: same day, 0DTE). --option-dte
+  // (2026-10-27) passes the Nth trading day after the trade date instead;
+  // positions are still opened and closed within the trade date.
+  // entryLookbackMin: also accept the most recent trade in the N minutes
+  // BEFORE the decision (a price already known then) - used for non-0DTE
+  // contracts, which trade far less often (an ATM 3DTE QQQ call printed in
+  // only ~93 of 390 minutes), so "first trade within 3 min after" skips
+  // ~half of entries a live market order would fill. 0 = 0DTE behavior.
+  constructor(
+    readonly haircut: number, readonly barMinutes: number,
+    readonly expiryFor: (day: string) => string = d => d,
+    readonly entryLookbackMin = 0, readonly entryForwardMin = ENTRY_MAX_DELAY_MIN
+  ) {}
 
   // Loads (from disk cache, or Alpaca) every contract in `strikes` x C/P for
   // one symbol-day. Cached per symbol-day; contracts added later are fetched
@@ -77,7 +89,8 @@ export class RealPremiumSource {
     mkdirSync(CACHE_DIR, { recursive: true })
     const file = `${CACHE_DIR}/${root}_${day}.json`
     const cached: Record<string, OptBar[]> = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
-    const wanted = strikes.flatMap(k => [occSymbol(root, day, 'C', k), occSymbol(root, day, 'P', k)])
+    const expiry = this.expiryFor(day)
+    const wanted = strikes.flatMap(k => [occSymbol(root, expiry, 'C', k), occSymbol(root, expiry, 'P', k)])
     const need = wanted.filter(c => !(c in cached))
     if (need.length) {
       for (let i = 0; i < need.length; i += 50) Object.assign(cached, await fetchBars(need.slice(i, i + 50), day))
@@ -85,22 +98,29 @@ export class RealPremiumSource {
       writeFileSync(`${file}.${process.pid}.tmp`, JSON.stringify(cached))
       renameSync(`${file}.${process.pid}.tmp`, file)
     }
-    for (const [c, b] of Object.entries(cached)) this.bars.set(c, b)
+    // Keyed by contract AND trade date: a non-0DTE contract trades on several
+    // days, each in its own day file.
+    for (const [c, b] of Object.entries(cached)) this.bars.set(`${c}|${day}`, b)
   }
 
   private decisionMs = (timeIso: string) => Date.parse(timeIso) + this.barMinutes * 60000
 
   private contract = (root: string, timeIso: string, type: 'call' | 'put', strike: number) =>
-    occSymbol(root, nyDateKey(timeIso), type === 'call' ? 'C' : 'P', strike)
+    occSymbol(root, this.expiryFor(nyDateKey(timeIso)), type === 'call' ? 'C' : 'P', strike)
 
   // Ask-side entry price, or null = no trade within the entry window.
   entryPremium(root: string, type: 'call' | 'put', strike: number, timeIso: string): number | null {
     const c = this.contract(root, timeIso, type, strike)
-    const bars = this.bars.get(c)
+    const bars = this.bars.get(`${c}|${nyDateKey(timeIso)}`)
     if (!bars) { this.missing.add(c); this.entriesNoTrade++; return null }
     const d = this.decisionMs(timeIso)
+    if (this.entryLookbackMin > 0) {
+      let prior: OptBar | undefined
+      for (const x of bars) { if (x.t + 60000 > d) break; prior = x }
+      if (prior && prior.t + 60000 >= d - this.entryLookbackMin * 60000) { this.entriesFilled++; return prior.c + this.haircut }
+    }
     const b = bars.find(x => x.t >= d)
-    if (!b || b.t > d + ENTRY_MAX_DELAY_MIN * 60000) { this.entriesNoTrade++; return null }
+    if (!b || b.t > d + this.entryForwardMin * 60000) { this.entriesNoTrade++; return null }
     this.entriesFilled++
     return b.o + this.haircut
   }
@@ -109,7 +129,7 @@ export class RealPremiumSource {
   // then, but not before the position's own entry fill. Falls back to the
   // entry trade price when nothing has traded since.
   mark(root: string, type: 'call' | 'put', strike: number, entryTimeIso: string, entryPremium: number, timeIso: string): number {
-    const bars = this.bars.get(this.contract(root, entryTimeIso, type, strike)) ?? []
+    const bars = this.bars.get(`${this.contract(root, entryTimeIso, type, strike)}|${nyDateKey(entryTimeIso)}`) ?? []
     const from = this.decisionMs(entryTimeIso)
     const until = this.decisionMs(timeIso)
     let last: OptBar | undefined
