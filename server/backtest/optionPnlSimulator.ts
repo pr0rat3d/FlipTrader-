@@ -218,6 +218,13 @@ export const closeOpposing = (position: SimPosition, underlyingClose: number, ti
   closeAll(position, premium, timeIso, 'opposing_close')
 }
 
+// Close the whole position at the current premium for a reason decided
+// outside this module - --option-exit underlying (2026-10-27) exits on the
+// UNDERLYING's own target/stop instead of the premium ladder.
+export const closePositionAt = (position: SimPosition, underlyingClose: number, timeIso: string, reason: SimulatedFill['reason']): void => {
+  closeAll(position, modeledPremiumAt(position, underlyingClose, timeIso), timeIso, reason)
+}
+
 const closeAll = (position: SimPosition, premium: number, timeIso: string, reason: SimulatedFill['reason']): void => {
   if (position.remaining > 0) {
     position.fills.push({ atIso: timeIso, premium, contractsSold: position.remaining, reason })
