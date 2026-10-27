@@ -37,6 +37,23 @@ export const toSessionBars = (candles: Candle[]): Bar[] => {
   return out
 }
 
+// Pre-market mode (2026-10-27): ALL extended-hours bars 04:00..19:59 ET, so
+// RSI/MACD/EMA/HA run continuously through pre-market, regular and
+// after-hours trading. Only the pre-market slice of each day is traded (see
+// dayRanges' window).
+export const EXT_OPEN = 4 * 60
+export const EXT_CLOSE = 20 * 60
+export const toExtendedBars = (candles: Candle[]): Bar[] => {
+  const out: Bar[] = []
+  for (const c of candles) {
+    const t = Date.parse(c.datetime)
+    const { day, minute } = nyDayMinute(t)
+    if (minute < EXT_OPEN || minute >= EXT_CLOSE) continue
+    out.push({ t, open: c.open, high: c.high, low: c.low, close: c.close, day, minute })
+  }
+  return out
+}
+
 export interface ResampledBar extends Bar {
   lastIdx: number // index into the 1m series of the last minute in this bucket
 }
@@ -124,11 +141,18 @@ export interface SymbolSeries {
 }
 
 const priorSessionCloses = (bars: Bar[]): Map<string, number[]> => {
+  // Regular-session close (last bar before 16:00) - identical to the day's
+  // last bar in regular mode, and ignores after-hours prints in pre-market mode.
   const out = new Map<string, number[]>()
   const closes: number[] = []
+  let lastRegular: number | null = null
   for (let i = 0; i < bars.length; i++) {
     if (!out.has(bars[i].day)) out.set(bars[i].day, [...closes])
-    if (i === bars.length - 1 || bars[i + 1].day !== bars[i].day) closes.push(bars[i].close)
+    if (bars[i].minute >= SESSION_OPEN && bars[i].minute < SESSION_CLOSE) lastRegular = bars[i].close
+    if (i === bars.length - 1 || bars[i + 1].day !== bars[i].day) {
+      if (lastRegular !== null) closes.push(lastRegular)
+      lastRegular = null
+    }
   }
   return out
 }

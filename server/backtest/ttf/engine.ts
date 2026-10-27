@@ -22,9 +22,12 @@ export interface DayFlags {
   trendDay: boolean
 }
 
-export const dayRanges = (s: SymbolSeries): Map<string, { start: number; end: number }> => {
+// window: only bars with minute in [from, to) count (pre-market mode);
+// bars are time-ordered, so each day's slice stays contiguous.
+export const dayRanges = (s: SymbolSeries, window?: { from: number; to: number }): Map<string, { start: number; end: number }> => {
   const out = new Map<string, { start: number; end: number }>()
   s.bars.forEach((b, i) => {
+    if (window && (b.minute < window.from || b.minute >= window.to)) return
     const r = out.get(b.day)
     if (r) r.end = i + 1
     else out.set(b.day, { start: i, end: i + 1 })
@@ -239,7 +242,7 @@ export interface Attempt {
 }
 
 export const timeBucket = (minute: number): string =>
-  minute < 630 ? '10:00-10:30' : minute < 660 ? '10:30-11:00' : minute < 720 ? '11:00-12:00' : minute < 840 ? '12:00-14:00' : '14:00-15:30'
+  minute < 510 ? '07:30-08:30' : minute < 570 ? '08:30-09:25' : minute < 630 ? '10:00-10:30' : minute < 660 ? '10:30-11:00' : minute < 720 ? '11:00-12:00' : minute < 840 ? '12:00-14:00' : '14:00-15:30'
 
 // Simulate one variant/start-time over one day. One open position per
 // symbol at a time (no averaging down), max N attempts per symbol per day.

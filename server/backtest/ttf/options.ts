@@ -30,14 +30,16 @@ export const otmStrike = (spot: number, type: 'C' | 'P', nOtm: number): number =
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-export const fetchOptionDay = async (contract: string, day: string): Promise<OptBar[]> => {
+// extended: pull from 07:00 ET (11:00Z) so pre-market trades are included -
+// a separate cache file, since the regular-mode files start at 13:00Z.
+export const fetchOptionDay = async (contract: string, day: string, extended = false): Promise<OptBar[]> => {
   mkdirSync(CACHE_DIR, { recursive: true })
-  const file = `${CACHE_DIR}/${contract}.json`
+  const file = `${CACHE_DIR}/${contract}${extended ? '_ext' : ''}.json`
   if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf8'))
   const url = new URL(`${DATA_BASE_URL}/v1beta1/options/bars`)
   url.searchParams.set('symbols', contract)
   url.searchParams.set('timeframe', '1Min')
-  url.searchParams.set('start', `${day}T13:00:00Z`)
+  url.searchParams.set('start', `${day}T${extended ? '11' : '13'}:00:00Z`)
   url.searchParams.set('end', `${day}T21:00:00Z`)
   url.searchParams.set('limit', '10000')
   for (let tries = 0; ; tries++) {

@@ -8,11 +8,12 @@
 //   [--skip-options] [--no-divergence-filter] [--macd-exit-before-target]
 //   [--require-rejection] [--rejection-window 2]  (window implies the filter)
 //   [--trend-filter open|prevclose|ema50slope|ema200|daily] [--trend-days 5]
+//   [--session premarket]  (07:30-09:25 ET extended options session)
 //   [--charts 10]
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { fetchMinuteHistory } from '../server/backtest/fetchHistory.js'
-import { toSessionBars, buildSeries, SymbolSeries, Bar } from '../server/backtest/ttf/candles.js'
-import { DEFAULT_TTF_CONFIG, TtfConfig, VARIANTS, START_TIMES, SYMBOLS, Variant, TrendFilter, TREND_FILTERS } from '../server/backtest/ttf/config.js'
+import { toSessionBars, toExtendedBars, buildSeries, SymbolSeries, Bar } from '../server/backtest/ttf/candles.js'
+import { DEFAULT_TTF_CONFIG, TtfConfig, VARIANTS, START_TIMES, SYMBOLS, Variant, TrendFilter, TREND_FILTERS, Session, PREMARKET } from '../server/backtest/ttf/config.js'
 import { computeDayFlags, dayRanges, rawSignalsForDay, simulateDay, lineLogRows, DayFlags, Attempt, RawSignal } from '../server/backtest/ttf/engine.js'
 import { TrendlineParams } from '../server/backtest/ttf/trendlines.js'
 import { fetchOptionDay, priceAttempt, contractsFor } from '../server/backtest/ttf/options.js'
@@ -38,21 +39,23 @@ const parseArgs = () => {
     rejectionWindowBars: parseInt(get('--rejection-window') ?? '0', 10),
     trendFilter: (get('--trend-filter') ?? 'none') as TrendFilter,
     trendDays: parseInt(get('--trend-days') ?? '5', 10),
+    session: (get('--session') ?? 'regular') as Session,
     charts: parseInt(get('--charts') ?? '10', 10)
   }
 }
 
-const loadBars = async (symbol: string, start: string, end: string): Promise<Bar[]> => {
+const loadBars = async (symbol: string, start: string, end: string, session: Session): Promise<Bar[]> => {
   mkdirSync('backtest_out/cache', { recursive: true })
   // 10 calendar days of warm-up before the window so RSI/MACD/EMA50/HA are
   // settled on the first traded day.
   const warm = new Date(`${start}T00:00:00Z`)
   warm.setUTCDate(warm.getUTCDate() - 10)
   const from = warm.toISOString().slice(0, 10)
-  const file = `backtest_out/cache/ttf_1min_sip_${symbol}_${from}_${end}.json`
+  const file = `backtest_out/cache/ttf_1min_sip${session === 'premarket' ? '_ext' : ''}_${symbol}_${from}_${end}.json`
   if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf8'))
   console.log(`  fetching ${symbol} 1m SIP ${from}..${end}`)
-  const bars = toSessionBars(await fetchMinuteHistory(symbol, `${from}T00:00:00Z`, `${end}T23:59:59Z`, 'sip'))
+  const raw = await fetchMinuteHistory(symbol, `${from}T00:00:00Z`, `${end}T23:59:59Z`, 'sip')
+  const bars = session === 'premarket' ? toExtendedBars(raw) : toSessionBars(raw)
   writeFileSync(file, JSON.stringify(bars))
   return bars
 }
@@ -69,13 +72,16 @@ const label = (v: Variant, start: number) => `${v} @ ${Math.floor(start / 60)}:$
 
 const main = async () => {
   const opts = parseArgs()
-  const cfg: TtfConfig = { ...DEFAULT_TTF_CONFIG, divergenceFilter: opts.divergenceFilter, macdExitBeforeTarget: opts.macdExitBeforeTarget, requireRejection: opts.requireRejection, rejectionWindowBars: opts.rejectionWindowBars, trendFilter: opts.trendFilter, trendDays: opts.trendDays }
+  const cfg: TtfConfig = { ...DEFAULT_TTF_CONFIG, divergenceFilter: opts.divergenceFilter, macdExitBeforeTarget: opts.macdExitBeforeTarget, requireRejection: opts.requireRejection, rejectionWindowBars: opts.rejectionWindowBars, trendFilter: opts.trendFilter, trendDays: opts.trendDays, session: opts.session }
+  if (cfg.session === 'premarket') { cfg.lastEntryMinutes = PREMARKET.lastEntryMinutes; cfg.forceExitMinutes = PREMARKET.forceExitMinutes }
+  const startTimes = cfg.session === 'premarket' ? PREMARKET.startTimes : START_TIMES
+  const hhmm = (m: number) => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`
   if (!TREND_FILTERS.includes(cfg.trendFilter)) throw new Error(`--trend-filter must be one of ${TREND_FILTERS.join(', ')}`)
   console.log(`TTF backtest ${opts.start}..${opts.end} (${opts.months} months)`)
 
   const series = new Map<string, SymbolSeries>()
-  for (const sym of SYMBOLS) series.set(sym, buildSeries(sym, await loadBars(sym, opts.start, opts.end), cfg.rsiPeriod))
-  const ranges = new Map(SYMBOLS.map(sym => [sym, dayRanges(series.get(sym)!)]))
+  for (const sym of SYMBOLS) series.set(sym, buildSeries(sym, await loadBars(sym, opts.start, opts.end, cfg.session), cfg.rsiPeriod))
+  const ranges = new Map(SYMBOLS.map(sym => [sym, dayRanges(series.get(sym)!, cfg.session === 'premarket' ? { from: PREMARKET.structureFrom, to: PREMARKET.windowEnd } : undefined)]))
   const tradeDays = [...ranges.get('SPY')!.keys()].filter(d => d >= opts.start && d <= opts.end).sort()
   console.log(`  ${tradeDays.length} sessions`)
 
@@ -96,27 +102,30 @@ const main = async () => {
     const signals = rawSignalsForDay(dayFlags, cfg, series)
     allSignals.push(...signals)
     const byKey = new Map(dayFlags.map(f => [f.symbol, f]))
-    for (const v of VARIANTS) for (const st of START_TIMES) attempts.push(...simulateDay(signals, byKey, series, v, st, cfg))
+    for (const v of VARIANTS) for (const st of startTimes) attempts.push(...simulateDay(signals, byKey, series, v, st, cfg))
   }
-  console.log(`  ${allSignals.length} raw signal bars, ${attempts.length} attempts across ${VARIANTS.length * START_TIMES.length} variant/start combos`)
+  console.log(`  ${allSignals.length} raw signal bars, ${attempts.length} attempts across ${VARIANTS.length * startTimes.length} variant/start combos`)
 
   // Phase 2: real 0DTE option bars
   const priced: PricedAttempt[] = attempts.map(a => ({ ...a, options: [] }))
   let optionNote = 'skipped (--skip-options)'
   if (!opts.skipOptions) {
     const needed = new Map<string, string>()
-    for (const a of attempts) for (const n of [1, 2]) needed.set(contractsFor(a, n), a.day)
+    // Pre-market: options only traded in that session from PREMARKET.optionsFrom on.
+    const priceable = (a: Attempt) => cfg.session !== 'premarket' || a.day >= PREMARKET.optionsFrom
+    for (const a of attempts) if (priceable(a)) for (const n of [1, 2]) needed.set(contractsFor(a, n), a.day)
     console.log(`  fetching ${needed.size} option contracts (cached after first run)`)
     const barsByContract = new Map<string, Awaited<ReturnType<typeof fetchOptionDay>>>()
     const queue = [...needed.entries()]
     let done = 0
     await Promise.all(Array.from({ length: 4 }, async () => {
       for (let item = queue.shift(); item; item = queue.shift()) {
-        barsByContract.set(item[0], await fetchOptionDay(item[0], item[1]))
+        barsByContract.set(item[0], await fetchOptionDay(item[0], item[1], cfg.session === 'premarket'))
         if (++done % 200 === 0) console.log(`    ${done}/${needed.size}`)
       }
     }))
     for (const a of priced) for (const n of [1, 2]) {
+      if (!priceable(a)) continue
       const c = contractsFor(a, n)
       a.options.push(priceAttempt(a, barsByContract.get(c) ?? [], n, c, cfg))
     }
@@ -124,7 +133,7 @@ const main = async () => {
     optionNote = `${filled}/${priced.length * 2} attempt-legs filled from real trade bars`
   }
 
-  const tag = `${opts.start}_to_${opts.end}${cfg.divergenceFilter ? '' : '_nodivfilter'}${cfg.macdExitBeforeTarget ? '_macdexitearly' : ''}${cfg.requireRejection ? `_rejection${cfg.rejectionWindowBars ? `_w${cfg.rejectionWindowBars}` : ''}` : ''}${cfg.trendFilter !== 'none' ? `_trend-${cfg.trendFilter}${cfg.trendFilter === 'daily' ? cfg.trendDays : ''}` : ''}`
+  const tag = `${opts.start}_to_${opts.end}${cfg.divergenceFilter ? '' : '_nodivfilter'}${cfg.macdExitBeforeTarget ? '_macdexitearly' : ''}${cfg.requireRejection ? `_rejection${cfg.rejectionWindowBars ? `_w${cfg.rejectionWindowBars}` : ''}` : ''}${cfg.trendFilter !== 'none' ? `_trend-${cfg.trendFilter}${cfg.trendFilter === 'daily' ? cfg.trendDays : ''}` : ''}${cfg.session === 'premarket' ? '_premarket' : ''}`
   const outDir = `backtest_out/ttf/${tag}`
   mkdirSync(`${outDir}/charts`, { recursive: true })
   writeFileSync(`${outDir}/attempts.csv`, attemptsCsv(priced, cfg.optionHaircuts))
@@ -134,7 +143,7 @@ const main = async () => {
   // Charts: N random trades per variant (10:00 start)
   const chartFiles: string[] = []
   for (const v of VARIANTS) {
-    const pool = priced.filter(a => a.variant === v && a.startMinute === START_TIMES[0])
+    const pool = priced.filter(a => a.variant === v && a.startMinute === startTimes[0])
     seededPick(pool, opts.charts, 7).forEach((a, k) => {
       const file = `${outDir}/charts/${v}_${k + 1}_${a.symbol}_${a.day}.png`
       renderAttemptPng(a, flagsByKey.get(`${a.symbol}|${a.day}`)!, series.get(a.symbol)!, file)
@@ -154,15 +163,16 @@ const main = async () => {
     `- Stops: % stop ${(cfg.stopPct * 100).toFixed(2)}% intrabar (filled at stop or worse open); B/C also exit on a 1m close beyond the entry trendline by > tolerance (next bar open). Variant A has no trendline, so % stop only. R uses the nearer stop.`,
     `- Rejection filter (not in spec): ${cfg.requireRejection ? `ON - a B/C line touch only counts once a bar ${cfg.rejectionWindowBars ? `within ${cfg.rejectionWindowBars} bar(s) after the touch (or the touch bar itself)` : '(the touch bar itself)'} closes back on the reversal side of the line in the trade direction, line not broken in between; entry off that bar` : 'off'}`,
     `- Trend filter (not in spec): ${cfg.trendFilter === 'none' ? 'off' : `${cfg.trendFilter}${cfg.trendFilter === 'daily' ? ` (${cfg.trendDays} sessions)` : ''} - shorts skipped while the read is up, longs while it's down`}`,
-    `- Index-divergence filter: ${cfg.divergenceFilter ? 'ON' : 'OFF'}. Max ${cfg.maxAttemptsPerSymbolDay} attempts/symbol/day, one position per symbol at a time. No entries at/after 15:30; force exit 15:55.`,
+    `- Index-divergence filter: ${cfg.divergenceFilter ? 'ON' : 'OFF'}. Max ${cfg.maxAttemptsPerSymbolDay} attempts/symbol/day, one position per symbol at a time. No entries at/after ${hhmm(cfg.lastEntryMinutes)}; force exit ${hhmm(cfg.forceExitMinutes)}.`,
+    ...(cfg.session === 'premarket' ? [`- PRE-MARKET session: indicators run continuously on 04:00-20:00 extended bars; trendlines/flags built from 04:00; entries ${startTimes.map(hhmm).join(' or ')} to ${hhmm(cfg.lastEntryMinutes)}. Options priced only from ${PREMARKET.optionsFrom} (extended options session launch) - earlier attempts have underlying R only.`] : []),
     `- Entries fill at the next 1m bar open after the signal bar closes. EMA50 target = previous bar's EMA50(HA) value, touched by the real high/low.`,
     `- Options: 0DTE, strike = 1st/2nd $1 strike strictly OTM from the entry price, ${cfg.contractsPerTrade} contracts (half = 1). Entry = first option trade bar within ${cfg.optionMaxEntryDelayMin} min of the underlying entry (else no fill); each exit = next option bar at/after the 1m bar following the trigger. Haircut $${h.toFixed(2)}/share per side unless noted.`,
     '')
   md.push('## Summary', '', SUMMARY_HEADER)
-  for (const v of VARIANTS) for (const st of START_TIMES) md.push(summaryRow(label(v, st), priced.filter(a => a.variant === v && a.startMinute === st), h))
+  for (const v of VARIANTS) for (const st of startTimes) md.push(summaryRow(label(v, st), priced.filter(a => a.variant === v && a.startMinute === st), h))
   md.push('', `Option columns: fills / win rate / total $ / max drawdown $, ${cfg.contractsPerTrade} contracts per attempt, $${h.toFixed(2)} haircut. ⚠ <30 = too small to judge.`, '')
 
-  for (const v of VARIANTS) for (const st of START_TIMES) {
+  for (const v of VARIANTS) for (const st of startTimes) {
     const g = priced.filter(a => a.variant === v && a.startMinute === st)
     if (!g.length) continue
     md.push(`## Variant ${label(v, st)}`, '')
@@ -177,7 +187,7 @@ const main = async () => {
   md.push('## Charts', '', ...chartFiles.map(f => `- ${f}`), '')
   writeFileSync(`${outDir}/summary.md`, md.join('\n'))
   console.log(`\nWrote ${outDir}/summary.md, attempts.csv, trendlines_log.csv, ${chartFiles.length} charts`)
-  console.log('\n' + md.slice(md.indexOf('## Summary'), md.indexOf('## Summary') + 4 + VARIANTS.length * START_TIMES.length).join('\n'))
+  console.log('\n' + md.slice(md.indexOf('## Summary'), md.indexOf('## Summary') + 4 + VARIANTS.length * startTimes.length).join('\n'))
 }
 
 const humanLogSection = (

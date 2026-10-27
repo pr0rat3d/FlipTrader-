@@ -54,6 +54,7 @@ export interface TtfConfig {
   rejectionWindowBars: number
   trendFilter: TrendFilter
   trendDays: number // lookback for trendFilter 'daily'
+  session: Session
   stopPct: number
   maxAttemptsPerSymbolDay: number
   lastEntryMinutes: number // ET minutes-since-midnight; no new entries at/after
@@ -78,6 +79,7 @@ export const DEFAULT_TTF_CONFIG: TtfConfig = {
   rejectionWindowBars: 0,
   trendFilter: 'none',
   trendDays: 5,
+  session: 'regular',
   stopPct: 0.0025,
   maxAttemptsPerSymbolDay: 3,
   lastEntryMinutes: 15 * 60 + 30,
@@ -93,5 +95,21 @@ export const TREND_FILTERS: TrendFilter[] = ['none', 'open', 'prevclose', 'ema50
 export type Variant = 'A' | 'B' | 'C'
 export const VARIANTS: Variant[] = ['A', 'B', 'C']
 export const START_TIMES = [10 * 60, 10 * 60 + 30]
+
+// Pre-market mode (2026-10-27): extended-session options on SPY/QQQ/IWM
+// trade 07:30-09:25 ET (Cboe / NYSE American, launched 2026-10-19).
+// Trendlines and flags are built from 04:00 so 07:30 starts with structure;
+// entries from 07:30 (or 08:00), none at/after 09:10, forced out on the
+// 09:24 bar's open, before the 09:25 options halt. Option prices only exist
+// from the launch date on - before that, only the underlying R is measured.
+export type Session = 'regular' | 'premarket'
+export const PREMARKET = {
+  structureFrom: 4 * 60,
+  windowEnd: 9 * 60 + 25,
+  startTimes: [7 * 60 + 30, 8 * 60],
+  lastEntryMinutes: 9 * 60 + 10,
+  forceExitMinutes: 9 * 60 + 24,
+  optionsFrom: '2026-10-19'
+}
 export const SYMBOLS = ['SPY', 'QQQ', 'IWM'] as const
 export type Direction = 'bullish' | 'bearish'
