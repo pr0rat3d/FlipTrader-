@@ -10,3 +10,6 @@ backtest_out/
 .env*
 .vercel
 supabase/.temp/
+
+# Personal logged TTF trades - public repo, only the .sample.csv is committed
+backtest_in/ttf_human_logs.csv

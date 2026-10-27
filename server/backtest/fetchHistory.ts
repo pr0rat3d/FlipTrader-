@@ -32,7 +32,13 @@ const toCandle = (b: AlpacaBar): Candle => ({
 // raw split shows up as a fake -50%+ one-day crash.
 export type BarAdjustment = 'raw' | 'split' | 'dividend' | 'all'
 
-const fetchAllBars = async (symbol: string, timeframe: string, start: string, end: string, adjustment: BarAdjustment = 'raw'): Promise<AlpacaBar[]> => {
+// feed: 'iex' (default - see the comment in the loop) or 'sip'. SIP is the
+// full consolidated tape and works for anything older than Alpaca's recent-
+// data window; the TTF backtest uses it because IEX 1-min bars drop minutes
+// (IWM: 385/390 on 2026-10-23), which matters at 1-min resolution.
+export type BarFeed = 'iex' | 'sip'
+
+const fetchAllBars = async (symbol: string, timeframe: string, start: string, end: string, adjustment: BarAdjustment = 'raw', feed: BarFeed = 'iex'): Promise<AlpacaBar[]> => {
   let all: AlpacaBar[] = []
   let pageToken: string | undefined
 
@@ -50,7 +56,7 @@ const fetchAllBars = async (symbol: string, timeframe: string, start: string, en
     // that this shouldn't meaningfully change signal-level patterns
     // (RSI divergence, MACD crosses, daily trend) - fine for this backtest's
     // purpose even if not perfectly tick-complete.
-    url.searchParams.set('feed', 'iex')
+    url.searchParams.set('feed', feed)
     url.searchParams.set('adjustment', adjustment)
     if (pageToken) url.searchParams.set('page_token', pageToken)
 
@@ -71,3 +77,6 @@ export const fetchIntradayHistory = async (symbol: string, start: string, end: s
 
 export const fetchDailyHistory = async (symbol: string, start: string, end: string, adjustment: BarAdjustment = 'raw'): Promise<Candle[]> =>
   (await fetchAllBars(symbol, '1Day', start, end, adjustment)).map(toCandle)
+
+export const fetchMinuteHistory = async (symbol: string, start: string, end: string, feed: BarFeed = 'sip'): Promise<Candle[]> =>
+  (await fetchAllBars(symbol, '1Min', start, end, 'raw', feed)).map(toCandle)

@@ -1,0 +1,7 @@
+# Sample - replace with real logged TTF trades and save as backtest_in/ttf_human_logs.csv
+# timestamp: ISO with offset, or "YYYY-MM-DD HH:MM" (New York time)
+# direction: bullish|bearish (long/short, call/put also accepted)
+timestamp,symbol,direction,entry,exit,result
+2026-10-23 10:39,SPY,bullish,760.02,762.18,win
+2026-10-23 10:39,IWM,bullish,273.91,275.28,win
+2026-09-15T14:12:00-04:00,QQQ,bearish,590.10,591.00,loss
