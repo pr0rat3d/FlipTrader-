@@ -9,6 +9,12 @@ const RVOL_THRESHOLD = 1.5
 // How many trading days back to compare for relative strength - a swing-
 // appropriate window (noisier at 1 day, too slow at 20).
 const RELATIVE_STRENGTH_LOOKBACK_DAYS = 5
+// Daily RSI(14) below this = on the Daily Oversold list. Stocks only - the
+// swing options layer that used to trade this list was removed 2026-10-27.
+const OVERSOLD_RSI = 30
+// A symbol whose newest daily snapshot is older than this has dropped out
+// of the scanner's rotation - don't show a months-old RSI as if it's current.
+const OVERSOLD_MAX_AGE_DAYS = 5
 
 interface GapRow {
   symbol: string
@@ -24,6 +30,17 @@ interface GapRow {
 interface MoverRow {
   symbol: string
   rvol: number
+}
+
+interface OversoldRow {
+  symbol: string
+  sector: string | null
+  rsi: number
+  close: number
+  // Price vs its daily 200 EMA - oversold above it is a pullback in an
+  // uptrend; oversold below it is a stock that's still falling.
+  aboveEma200: boolean | null
+  asOf: string
 }
 
 interface SectorRow {
@@ -100,6 +117,42 @@ const GapScannerSection: React.FC<{ rows: GapRow[] }> = ({ rows }) => (
                 <td className="text-xs text-white" style={{ padding: '4px 8px' }}>
                   {row.filled ? 'Filled' : row.fillProgressPct !== null ? `${row.fillProgressPct.toFixed(0)}% filled` : '—'}
                 </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )}
+  </div>
+)
+
+const OversoldSection: React.FC<{ rows: OversoldRow[] }> = ({ rows }) => (
+  <div className="p-3 bg-gray-800 rounded mb-3">
+    <h3 className="text-sm font-bold text-white mb-1">Daily Oversold</h3>
+    <p className="text-xs text-gray-400 mb-2">Daily RSI(14) below {OVERSOLD_RSI} - possible swing entries on the stock (shares, not options)</p>
+    {rows.length === 0 ? (
+      <p className="text-xs text-gray-400">Nothing below RSI {OVERSOLD_RSI} right now.</p>
+    ) : (
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              {['Symbol', 'Sector', 'RSI', 'Price', 'Trend (200 EMA)', 'As of'].map(h => (
+                <th key={h} className="text-xs text-gray-400" style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #374151' }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(row => (
+              <tr key={row.symbol}>
+                <td className="text-xs text-white font-bold" style={{ padding: '4px 8px' }}>{row.symbol}</td>
+                <td className="text-xs text-gray-400" style={{ padding: '4px 8px' }}>{row.sector ?? '—'}</td>
+                <td className="text-xs font-bold" style={{ padding: '4px 8px', color: '#4ade80' }}>{row.rsi.toFixed(1)}</td>
+                <td className="text-xs text-white" style={{ padding: '4px 8px' }}>${row.close.toFixed(2)}</td>
+                <td className="text-xs" style={{ padding: '4px 8px', color: row.aboveEma200 === null ? '#9ca3af' : row.aboveEma200 ? '#4ade80' : '#f87171' }}>
+                  {row.aboveEma200 === null ? '—' : row.aboveEma200 ? 'Above (pullback)' : 'Below (downtrend)'}
+                </td>
+                <td className="text-xs text-gray-400" style={{ padding: '4px 8px' }}>{new Date(row.asOf).toLocaleDateString()}</td>
               </tr>
             ))}
           </tbody>
@@ -256,6 +309,24 @@ export const Scanner: React.FC = () => {
     return rows.sort((a, b) => b.rvol - a.rvol)
   }, [symbols, snapshotsBySymbol, levelsBySymbol])
 
+  const oversoldRows: OversoldRow[] = useMemo(() => {
+    const rows: OversoldRow[] = []
+    for (const symbol of symbols) {
+      const latest = snapshotsBySymbol.get(symbol)?.[0]
+      if (!latest || latest.rsi === null || latest.rsi >= OVERSOLD_RSI) continue
+      if (Date.now() - new Date(latest.timestamp).getTime() > OVERSOLD_MAX_AGE_DAYS * 86400000) continue
+      rows.push({
+        symbol,
+        sector: sectorBySymbol.get(symbol) ?? null,
+        rsi: latest.rsi,
+        close: latest.close_price,
+        aboveEma200: latest.ema_200 === null ? null : latest.close_price > latest.ema_200,
+        asOf: latest.timestamp
+      })
+    }
+    return rows.sort((a, b) => a.rsi - b.rsi)
+  }, [symbols, snapshotsBySymbol, sectorBySymbol])
+
   const sectorRows: SectorRow[] = useMemo(() => {
     const changes = new Map<string, number>()
     for (const symbol of symbols) {
@@ -298,8 +369,9 @@ export const Scanner: React.FC = () => {
     <div className="p-4">
       <h2 className="text-2xl font-bold text-white mb-2">Scanner</h2>
       <p className="text-xs text-gray-400 mb-4">
-        Discovery tools across the swing universe - gaps waiting to fill, stocks
-        trading at unusual volume, and stocks leading or lagging their own sector.
+        Stock discovery across the scanner universe - daily oversold names, gaps
+        waiting to fill, stocks trading at unusual volume, and stocks leading or
+        lagging their own sector.
         {' '}Real bid/ask spread isn't available on the free data tier this app uses,
         so RVOL (relative volume) stands in as the practical "is this worth trading"
         signal instead.
@@ -309,6 +381,7 @@ export const Scanner: React.FC = () => {
 
       {!loading && (
         <>
+          <OversoldSection rows={oversoldRows} />
           <GapScannerSection rows={gapRows} />
           <MoversSection rows={moverRows} />
           <SectorLeadersSection rows={sectorRows} />

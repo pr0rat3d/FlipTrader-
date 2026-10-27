@@ -66,31 +66,6 @@ export interface ProfitTarget {
   created_at: string;
 }
 
-export interface SwingAlert {
-  id: string;
-  symbol: string;
-  rsi_value: number;
-  sector: string;
-  oversold_date: string;
-  created_at: string;
-  signal_type?: 'CALL' | 'PUT';
-  option_symbol?: string | null;
-  expiration_date?: string | null;
-  recommended_strike?: number | null;
-  delta?: number | null;
-  gamma?: number | null;
-  theta?: number | null;
-  vega?: number | null;
-  iv_current?: number | null;
-  iv_rank?: number | null;
-  entry_rationale?: string | null;
-  bid_price?: number | null;
-  ask_price?: number | null;
-  ideal_entry_price?: number | null;
-  open_interest?: number | null;
-  liquidity_tier?: 'tight' | 'moderate' | 'wide' | null;
-}
-
 export interface UserPreferences {
   id: string;
   user_id: string;
@@ -153,7 +128,6 @@ export interface DailyLevel {
 export interface ExecutionSettings {
   id: number;
   is_enabled: boolean;
-  swing_enabled: boolean;
   min_confidence: number;
   risk_pct: number;
   min_qty: number;

@@ -22,7 +22,7 @@ export const AlertHistory: React.FC = () => {
   }, [])
 
   return (
-    <div className="p-4">
+    <div>
       <h2 className="text-2xl font-bold text-white mb-4">Alert History</h2>
 
       {loading && <p className="text-gray-400">Loading...</p>}

@@ -3,6 +3,7 @@ import { useAlerts } from '../hooks/useAlerts'
 import { useLivePrices } from '../hooks/useLivePrices'
 import { useLegLiveStatus } from '../hooks/useLegLiveStatus'
 import { AlertCard } from './AlertCard'
+import { AlertHistory } from './AlertHistory'
 import { Alert } from '../types'
 
 const DAY_TRADE_INDICES = ['SPY', 'QQQ', 'IWM']
@@ -136,6 +137,10 @@ export const Dashboard: React.FC = () => {
             firstSeenAt={group.firstSeenAt}
           />
         ))}
+      </div>
+
+      <div className="mt-8">
+        <AlertHistory />
       </div>
     </div>
   )

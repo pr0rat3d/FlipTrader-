@@ -16,12 +16,6 @@ export const subscribeToAlerts = (callback: (alert: any) => void) => {
     .subscribe()
 }
 
-export const subscribeToSwingAlerts = (callback: (alert: any) => void) => {
-  return supabase
-    .channel('swing_trade_alerts')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'swing_trade_alerts' }, callback)
-    .subscribe()
-}
 
 export const subscribeToProfitTargets = (callback: (target: any) => void) => {
   return supabase
@@ -42,8 +36,8 @@ export const getAlerts = async () => {
 }
 
 // Dashboard-only: scoped to today so the active-alerts view doesn't accumulate
-// every alert ever fired - anything older belongs on the History page (still
-// getAlerts()'s full unscoped list) or Performance, not cluttering "what's
+// every alert ever fired - anything older belongs in the Alert History list
+// under it (getAlerts()'s full unscoped list) or Performance, not cluttering "what's
 // live right now."
 export const getTodayAlerts = async () => {
   const { data, error } = await supabase
@@ -70,16 +64,6 @@ export const getTodayLegStatuses = async (): Promise<{ id: string; day_trade_ale
   return data || []
 }
 
-export const getSwingAlerts = async () => {
-  const { data, error } = await supabase
-    .from('swing_trade_alerts')
-    .select('*')
-    .order('oversold_date', { ascending: false })
-    .limit(20)
-
-  if (error) throw error
-  return data
-}
 
 export const getProfitTargets = async () => {
   const { data, error } = await supabase
@@ -293,14 +277,6 @@ export const setExecutionEnabled = async (isEnabled: boolean) => {
   if (error) throw error
 }
 
-export const setSwingExecutionEnabled = async (swingEnabled: boolean) => {
-  const { error } = await supabase
-    .from('execution_settings')
-    .update({ swing_enabled: swingEnabled, updated_at: new Date().toISOString() })
-    .eq('id', 1)
-
-  if (error) throw error
-}
 
 export const getDailyLevelsForSymbols = async (symbols: string[]) => {
   if (symbols.length === 0) return []
