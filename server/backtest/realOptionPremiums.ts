@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { nyDateKey } from '../marketHours.js'
 
 // Real historical option prices for the main backtest (2026-10-27) - a
@@ -81,7 +81,9 @@ export class RealPremiumSource {
     const need = wanted.filter(c => !(c in cached))
     if (need.length) {
       for (let i = 0; i < need.length; i += 50) Object.assign(cached, await fetchBars(need.slice(i, i + 50), day))
-      writeFileSync(file, JSON.stringify(cached))
+      // tmp + rename: another backtest process may be reading this file.
+      writeFileSync(`${file}.${process.pid}.tmp`, JSON.stringify(cached))
+      renameSync(`${file}.${process.pid}.tmp`, file)
     }
     for (const [c, b] of Object.entries(cached)) this.bars.set(c, b)
   }
