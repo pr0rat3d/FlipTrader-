@@ -60,7 +60,13 @@ const fetchAllBars = async (symbol: string, timeframe: string, start: string, en
     url.searchParams.set('adjustment', adjustment)
     if (pageToken) url.searchParams.set('page_token', pageToken)
 
-    const res = await fetch(url.toString(), { headers: headers() })
+    // Back off on 429 (shared 200 req/min data budget - e.g. two backtests
+    // downloading at once) instead of failing a long run partway through.
+    let res = await fetch(url.toString(), { headers: headers() })
+    for (let tries = 0; res.status === 429 && tries < 8; tries++) {
+      await new Promise(r => setTimeout(r, 15000))
+      res = await fetch(url.toString(), { headers: headers() })
+    }
     if (!res.ok) throw new Error(`Alpaca bars ${symbol} ${timeframe} failed: ${res.status} ${await res.text()}`)
 
     const json = await res.json()
