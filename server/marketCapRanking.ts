@@ -17,7 +17,7 @@ export const TOP_N = 100
 // leaves ~30/min headroom, not just a thin margin: `track-profit-targets.ts`
 // calls getQuote once per OPEN day-trade leg every invocation (unbounded by
 // this file, scales with however many legs are open on a busy day), plus
-// scan-confluence.ts/scan-mag7-iv.ts's 1 VIX quote each. This ranking job
+// scan-confluence.ts's 1 VIX quote. This ranking job
 // is a low-priority background refresh (runs once/month) - it should never
 // be the thing that pushes live trading's own Finnhub calls into a 429.
 export const MARKET_CAP_BATCH_SIZE = 30
