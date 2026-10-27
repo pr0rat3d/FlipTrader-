@@ -3,7 +3,7 @@ import { subscribeToAlerts, getTodayAlerts } from '../lib/supabase'
 import { Alert } from '../types'
 
 // Dashboard-only, deliberately scoped to today (see getTodayAlerts) - the full
-// unscoped history is still available on the History page and Performance.
+// unscoped history is still available in Alert History under the Dashboard.
 export const useAlerts = () => {
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [loading, setLoading] = useState(true)

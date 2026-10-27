@@ -37,7 +37,7 @@ export const getAlerts = async () => {
 
 // Dashboard-only: scoped to today so the active-alerts view doesn't accumulate
 // every alert ever fired - anything older belongs in the Alert History list
-// under it (getAlerts()'s full unscoped list) or Performance, not cluttering "what's
+// under it (getAlerts()'s full unscoped list), not cluttering "what's
 // live right now."
 export const getTodayAlerts = async () => {
   const { data, error } = await supabase
@@ -53,7 +53,7 @@ export const getTodayAlerts = async () => {
 
 // Lightweight - just enough for the Dashboard to know whether each alert's
 // legs are still live (at least one 'open') or fully resolved (stopped_out/
-// expired/target_hit), without pulling every column getProfitTargets() does.
+// expired/target_hit), without pulling every profit_targets column.
 export const getTodayLegStatuses = async (): Promise<{ id: string; day_trade_alert_id: string; status: string }[]> => {
   const { data, error } = await supabase
     .from('profit_targets')
@@ -62,17 +62,6 @@ export const getTodayLegStatuses = async (): Promise<{ id: string; day_trade_ale
 
   if (error) throw error
   return data || []
-}
-
-
-export const getProfitTargets = async () => {
-  const { data, error } = await supabase
-    .from('profit_targets')
-    .select('*')
-    .order('created_at', { ascending: false })
-
-  if (error) throw error
-  return data
 }
 
 export const getProfitTargetsForAlert = async (alertId: string) => {

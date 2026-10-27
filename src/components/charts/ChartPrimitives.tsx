@@ -1,7 +1,7 @@
 import React from 'react'
 
 // Shared SVG chart building blocks, extracted from Indicators.tsx so new chart
-// pages (e.g. Performance) don't duplicate this plumbing.
+// pages don't duplicate this plumbing.
 
 // This app's existing bullish/bearish convention (AlertCard.tsx) - kept for consistency
 export const COLOR_BULLISH = '#4ade80'
