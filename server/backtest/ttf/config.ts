@@ -29,6 +29,16 @@
 //    fires on the rejection bar, off the touched line, if the line hasn't
 //    closed broken in between). Added because same-bar rejection dropped
 //    C's biggest winners, which turned a bar or two after the touch.
+//  - trendFilter (opt-in, NOT in spec): skip counter-trend signals - shorts
+//    while the trend read is up, longs while it's down. Reads, all known at
+//    the signal bar's close: 'open' = close vs today's 09:30 open;
+//    'prevclose' = close vs yesterday's last close; 'ema50slope' = EMA50(HA)
+//    now vs 15 bars ago; 'ema200' = close vs EMA200 of real 1m closes;
+//    'daily5' = yesterday's close vs the close 5 sessions before it (no
+//    intraday data at all - the intraday reads can't work for a reversal
+//    setup, since RSI>70 on 1/3/5m means price just ran up, so they read
+//    "up" at nearly every short signal).
+//    Added after C's losers turned out to be shorts into grinding uptrends.
 export interface TtfConfig {
   rsiPeriod: number
   rsiOversold: number
@@ -42,6 +52,7 @@ export interface TtfConfig {
   divergenceFilter: boolean
   requireRejection: boolean
   rejectionWindowBars: number
+  trendFilter: TrendFilter
   stopPct: number
   maxAttemptsPerSymbolDay: number
   lastEntryMinutes: number // ET minutes-since-midnight; no new entries at/after
@@ -64,6 +75,7 @@ export const DEFAULT_TTF_CONFIG: TtfConfig = {
   divergenceFilter: true,
   requireRejection: false,
   rejectionWindowBars: 0,
+  trendFilter: 'none',
   stopPct: 0.0025,
   maxAttemptsPerSymbolDay: 3,
   lastEntryMinutes: 15 * 60 + 30,
@@ -72,6 +84,9 @@ export const DEFAULT_TTF_CONFIG: TtfConfig = {
   optionHaircuts: [0, 0.02],
   optionMaxEntryDelayMin: 3
 }
+
+export type TrendFilter = 'none' | 'open' | 'prevclose' | 'ema50slope' | 'ema200' | 'daily5'
+export const TREND_FILTERS: TrendFilter[] = ['none', 'open', 'prevclose', 'ema50slope', 'ema200', 'daily5']
 
 export type Variant = 'A' | 'B' | 'C'
 export const VARIANTS: Variant[] = ['A', 'B', 'C']

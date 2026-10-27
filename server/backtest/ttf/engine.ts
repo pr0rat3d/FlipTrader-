@@ -1,6 +1,6 @@
 import { SymbolSeries } from './candles.js'
 import { TrendlineEngine, Line, LineLogEntry, TrendlineParams } from './trendlines.js'
-import { TtfConfig, Variant, Direction } from './config.js'
+import { TtfConfig, Variant, Direction, TrendFilter } from './config.js'
 
 // Per-session, per-bar setup state for one symbol. Every flag at local
 // index i only uses information available at the CLOSE of bar i.
@@ -99,6 +99,7 @@ export interface RawSignal {
   setupI: Partial<Record<Variant, number>> // bar whose line touch the trade is taken off (= i unless a delayed rejection confirmed it)
   indexCount: number
   divergenceBlocked: boolean
+  trend: -1 | 0 | 1 // cfg.trendFilter's read at the signal bar (0 = filter off or flat)
   conditions: { ttfActive: boolean; curl: boolean; touch: boolean; rejection: boolean; div: boolean }
 }
 
@@ -172,14 +173,36 @@ export const rawSignalsForDay = (days: DayFlags[], cfg: TtfConfig, s: Map<string
           if (ttfActiveAt(g, dir, j, cfg.ttfActiveBars)) indexCount++
           if (kk !== k && ttfActiveAt(g, opp, j, cfg.ttfActiveBars)) divergenceBlocked = true
         })
+        const ser = s.get(f.symbol)!
         out.push({
-          symbol: f.symbol, day: f.day, i, t: s.get(f.symbol)!.bars[f.start + i].t, minute: f.minute[i],
-          direction: dir, variants, setupI, indexCount, divergenceBlocked, conditions: c
+          symbol: f.symbol, day: f.day, i, t: ser.bars[f.start + i].t, minute: f.minute[i],
+          direction: dir, variants, setupI, indexCount, divergenceBlocked, trend: trendAt(f, ser, i, cfg.trendFilter), conditions: c
         })
       }
     }
   })
   return out.sort((a, b) => a.t - b.t)
+}
+
+// Trend read at session-local bar i (sign only). See config.ts trendFilter.
+export const trendAt = (f: DayFlags, s: SymbolSeries, i: number, mode: TrendFilter): -1 | 0 | 1 => {
+  const g = f.start + i
+  const close = s.bars[g].close
+  let d: number
+  switch (mode) {
+    case 'none': return 0
+    case 'open': d = close - s.bars[f.start].open; break
+    case 'prevclose': if (f.start === 0) return 0; d = close - s.bars[f.start - 1].close; break
+    case 'ema50slope': if (g < 15) return 0; d = s.ema50[g] - s.ema50[g - 15]; break
+    case 'ema200': d = close - s.ema200[g]; break
+    case 'daily5': {
+      const c = s.sessionCloses.get(f.day) ?? []
+      if (c.length < 6) return 0
+      d = c[c.length - 1] - c[c.length - 6]
+      break
+    }
+  }
+  return !Number.isFinite(d) || d === 0 ? 0 : d > 0 ? 1 : -1
 }
 
 export interface ExitFill {
@@ -230,6 +253,7 @@ export const simulateDay = (
     if (!sig.variants.includes(variant)) continue
     if (sig.minute < startMinute || sig.minute >= cfg.lastEntryMinutes) continue
     if (cfg.divergenceFilter && sig.divergenceBlocked) continue
+    if (sig.trend === (sig.direction === 'bullish' ? -1 : 1)) continue // counter-trend
     if ((count.get(sig.symbol) ?? 0) >= cfg.maxAttemptsPerSymbolDay) continue
     if ((busyUntil.get(sig.symbol) ?? -1) >= sig.i) continue
     const f = days.get(sig.symbol)!

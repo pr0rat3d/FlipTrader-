@@ -118,7 +118,19 @@ export interface SymbolSeries {
   rsi5: number[]
   macd1: number[]
   ema50: number[]
+  ema200: number[] // REAL 1m closes (not HA) - trend-filter input only
+  sessionCloses: Map<string, number[]> // day -> last closes of ALL prior sessions in the series, oldest first
   atr: number[]
+}
+
+const priorSessionCloses = (bars: Bar[]): Map<string, number[]> => {
+  const out = new Map<string, number[]>()
+  const closes: number[] = []
+  for (let i = 0; i < bars.length; i++) {
+    if (!out.has(bars[i].day)) out.set(bars[i].day, [...closes])
+    if (i === bars.length - 1 || bars[i + 1].day !== bars[i].day) closes.push(bars[i].close)
+  }
+  return out
 }
 
 export const buildSeries = (symbol: string, bars: Bar[], rsiPeriod: number): SymbolSeries => {
@@ -138,6 +150,8 @@ export const buildSeries = (symbol: string, bars: Bar[], rsiPeriod: number): Sym
     rsi5: idx5.map(j => (j >= 0 ? rsi5raw[j] : NaN)),
     macd1: macdLineSeries(closes1),
     ema50: emaSeries(closes1, 50),
+    ema200: emaSeries(bars.map(b => b.close), 200),
+    sessionCloses: priorSessionCloses(bars),
     atr: atrSeries(ha1, 14)
   }
 }
