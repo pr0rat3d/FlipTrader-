@@ -7,6 +7,13 @@ import {
 } from '../execution/optionPositionSizing.js'
 import { nyMinutesSinceMidnight } from '../rvol.js'
 import { nyDateKey } from '../marketHours.js'
+import { RealPremiumSource } from './realOptionPremiums.js'
+
+// --real-options (2026-10-27): when set, every entry and mark uses real
+// historical option trade prices instead of the Black-Scholes model. Unset
+// (default) = the model, unchanged.
+let realPremiums: RealPremiumSource | null = null
+export const useRealPremiums = (source: RealPremiumSource | null) => { realPremiums = source }
 
 // Incremental, bar-by-bar position model - mirrors monitor-executions.ts's
 // actual per-poll structure (not a pre-resolve-the-whole-future function
@@ -70,7 +77,8 @@ export const priceEntry = (
   // trades leverage/theta-decay-speed for materially less gamma exposure per
   // dollar of underlying movement - this flag tests whether that tradeoff
   // actually nets out better over a real window, not just intuition.
-  strikeOtmOffset: number = 0
+  strikeOtmOffset: number = 0,
+  symbol?: string
 ): EntryPriceOutcome => {
   const suggestion = suggestOptionStrike(direction, entryUnderlyingPrice, targetUnderlyingPrice)
   const contractType: OptionType = direction === 'bullish' ? 'call' : 'put'
@@ -78,7 +86,13 @@ export const priceEntry = (
 
   const sigma = Math.max(realizedVolatility(trailingCloses), 0.01) * ZERO_DTE_IV_MARKUP
   const T = minutesToCloseAt(entryTimeIso) / (60 * 24 * 365)
-  const entryPremium = blackScholesPrice(entryUnderlyingPrice, strike, T, RISK_FREE_RATE, sigma, contractType)
+  let entryPremium = blackScholesPrice(entryUnderlyingPrice, strike, T, RISK_FREE_RATE, sigma, contractType)
+  if (realPremiums) {
+    if (!symbol) throw new Error('priceEntry needs the symbol when real option premiums are on')
+    const real = realPremiums.entryPremium(symbol, contractType, strike, entryTimeIso)
+    if (real === null) return { ok: false, reason: 'no_option_trade' }
+    entryPremium = real
+  }
 
   const sizeSettings: ContractSizeSettings = { minAccountEquity: sizing.minEquity, maxAccountEquity: sizing.maxEquity }
   const sizeResult = computeContractCount(
@@ -93,7 +107,8 @@ export const priceEntry = (
 const MARKET_CLOSE_MINUTES_ET = 16 * 60
 const minutesToCloseAt = (iso: string) => Math.max(0, MARKET_CLOSE_MINUTES_ET - nyMinutesSinceMidnight(new Date(iso)))
 
-export const modeledPremiumAt = (position: Pick<SimPosition, 'strike' | 'contractType' | 'sigma'>, underlyingClose: number, timeIso: string): number => {
+export const modeledPremiumAt = (position: Pick<SimPosition, 'symbol' | 'strike' | 'contractType' | 'sigma' | 'entryTimeIso' | 'entryPremium'>, underlyingClose: number, timeIso: string): number => {
+  if (realPremiums) return realPremiums.mark(position.symbol, position.contractType, position.strike, position.entryTimeIso, position.entryPremium, timeIso)
   const T = minutesToCloseAt(timeIso) / (60 * 24 * 365)
   return blackScholesPrice(underlyingClose, position.strike, T, RISK_FREE_RATE, position.sigma, position.contractType)
 }

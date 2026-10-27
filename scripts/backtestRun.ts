@@ -23,6 +23,12 @@
 // "this is the exact dollar amount the bot would have made" - real
 // execution/slippage/liquidity effects aren't captured by either phase.
 //
+// UPDATE 2026-10-27: --real-options replaces the model with REAL historical
+// 0DTE option trade prices (server/backtest/realOptionPremiums.ts) - free on
+// this account's plan after all. The model badly overpriced morning 0DTE
+// premiums (e.g. $6.93 modeled vs $2.60 real for an ATM QQQ call at 09:40),
+// so prefer --real-options for any dollar figure.
+//
 // One live gate this backtest can't meaningfully replay: the 5-minute
 // staleness cutoff on unclaimed profit_targets legs. That gate exists
 // because live execution polls asynchronously, so a signal can sit
@@ -62,7 +68,8 @@ import { applyConfidenceModifiers } from '../server/confidenceModifiers.js'
 import { detectORBBreakout, filterORBCandidates, isDailyTrendAligned, isIntradayVwapAligned, orbBaseConfidence, continuationTargetPrice } from '../server/orb.js'
 import { deriveMilestonePrices, applyPriceSample, checkExpiry, ProfitTargetRow } from '../server/alertOutcomes.js'
 import { nyDateKey } from '../server/marketHours.js'
-import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition } from '../server/backtest/optionPnlSimulator.js'
+import { openPosition, checkPositionAtBar, priceEntry, closeOpposing, SimPosition, useRealPremiums } from '../server/backtest/optionPnlSimulator.js'
+import { RealPremiumSource } from '../server/backtest/realOptionPremiums.js'
 import {
   MARKET_OPEN_MINUTES_ET, IV_ELIGIBLE_AFTER_MINUTES, FORCE_CLOSE_HOUR_ET, FORCE_CLOSE_MINUTE_ET, TierSpec,
   RUNNER_TIER_NUMBER, RUNNER_TARGET_PCT, RISK_PCT_MULTIPLIER_BY_TYPE, DEFAULT_RISK_PCT_MULTIPLIER
@@ -385,6 +392,8 @@ const parseArgs = () => {
   const cciTargetRMultipleArg = get('--cci-target-r-multiple') // e.g. "1" (default in server/cciReset.ts) or "2" - overrides the quick-scalp 1R target the friend's "get in, get out" thesis implies, for sweeping against this app's usual 2R.
   const cciRequireVolumeConfirmationArg = args.includes('--cci-require-volume-confirmation') // 2026-08-23 - hard gate: reset bar's volume must be >=1.5x its trailing 20-bar average, isolated from the score threshold so it can be A/B tested on its own (same reasoning as --tttf-momentum-reset-gate). Off by default - volumePoints/volumeRatio are still computed and visible in the score either way.
   const strikeOtmOffsetArg = get('--strike-otm-offset') // e.g. "1" - dollars OUT of the money from the live ATM strike, ALL types. 2026-08-20: real incident where 3 same-second ATM 0DTE entries (SPY/QQQ/IWM DIV) all hard-stopped in 2-3min on <0.15% underlying moves - ATM 0DTE gamma amplifying chop, not a bug. Tests whether trading leverage for less gamma exposure nets out better.
+  const realOptionsArg = args.includes('--real-options') // 2026-10-27: real historical 0DTE option trade prices instead of the Black-Scholes model (see server/backtest/realOptionPremiums.ts)
+  const optionHaircutArg = get('--option-haircut') // $/share per side when --real-options is on, default 0.02 (trade bars have no bid/ask)
   const divStrikeOtmOffsetArg = get('--div-strike-otm-offset') // e.g. "1" - same idea, scoped to DIV only (the type actually involved in the 08-20 incident) - everything else keeps the live ATM strike.
   const toMinutes = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m }
   const tierPlanFn = tierPlanArg === 'fixed-ladder' ? fixedLadderNoRunnerTierPlan
@@ -432,12 +441,14 @@ const parseArgs = () => {
     cciRequireVolumeConfirmation: cciRequireVolumeConfirmationArg,
     strikeOtmOffset: strikeOtmOffsetArg ? parseFloat(strikeOtmOffsetArg) : undefined,
     divStrikeOtmOffset: divStrikeOtmOffsetArg ? parseFloat(divStrikeOtmOffsetArg) : undefined,
+    realOptions: realOptionsArg,
+    optionHaircut: optionHaircutArg ? parseFloat(optionHaircutArg) : 0.02,
     chopLabel: (chopStart && chopEnd) ? `${chopStart}-${chopEnd}` : 'live(11:30-13:30)'
   }
 }
 
 const main = async () => {
-  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation, strikeOtmOffset, divStrikeOtmOffset } = parseArgs()
+  const { start, end, hardStopPctOverride, tierPlanFn, tierPlanLabel, maxDailyEntries, chopZoneStartMinutes, chopZoneEndMinutes, chopLabel, orbIntradayVwapGate, hardStopPctByType, orbStopPctLabel, maxDailyCapitalBudget, dailyLossLimitPct, orbMinConfidenceOverride, divMinConfidenceOverride, quietOpenUntilMinutes, quietOpenUntilLabel, quarterHourConfidenceDiscount, quarterHourEntryFilterMinutes, orbQuarterHourDiscount, rebalanceCapitalPriority, disabledTypes, disabledTypesLabel, tttfCutoffMinutes, lastCallMinConfidence, divNoTrendModifier, mtfRsiModifier, divAdxTrendGate, adxcMinAdx, tttfMomentumResetGate, emabMinScore, pbcMinScore, divJointResetGate, remoraMinScore, remoraReversalBodyPct, cciMinScore, cciTargetRMultiple, cciRequireVolumeConfirmation, strikeOtmOffset, divStrikeOtmOffset, realOptions, optionHaircut } = parseArgs()
   console.log(`Backtesting ${SYMBOLS.join('/')} from ${start} to ${end}...`)
   console.log(`ORB intraday VWAP gate: ${orbIntradayVwapGate ? 'ON (daily-trend OR intraday-vwap)' : 'OFF (daily-trend only, live default)'}`)
   console.log(`ORB stop-pct override: ${orbStopPctLabel}`)
@@ -461,6 +472,7 @@ const main = async () => {
   console.log(`Capital priority rebalance (ORB/IV half-size): ${rebalanceCapitalPriority ? 'ON' : 'OFF'}`)
   console.log(`Strike OTM offset (all types): ${strikeOtmOffset !== undefined ? `$${strikeOtmOffset} OTM` : 'off (live default: ATM)'}`)
   console.log(`Strike OTM offset (DIV only): ${divStrikeOtmOffset !== undefined ? `$${divStrikeOtmOffset} OTM` : 'off (live default: ATM)'}`)
+  console.log(`Option premiums: ${realOptions ? `REAL Alpaca 0DTE trade bars, $${optionHaircut.toFixed(2)}/share haircut per side` : 'Black-Scholes model (default)'}`)
   console.log(`Disabled signal types: ${disabledTypesLabel}`)
   console.log(`Daily cap mode: ${maxDailyCapitalBudget !== undefined ? `capital-based ($${maxDailyCapitalBudget})` : `count-based (${maxDailyEntries === Infinity ? 'unlimited' : maxDailyEntries})`}`)
   console.log(`Daily loss circuit breaker: ${dailyLossLimitPct !== undefined ? `ON (${(dailyLossLimitPct * 100).toFixed(0)}% of day's starting equity)` : 'OFF'}`)
@@ -509,6 +521,39 @@ const main = async () => {
   // extra lookback fetched above is warm-up context, not evaluated).
   const scoredStartMs = new Date(`${start}T00:00:00Z`).getTime()
   const clockBars = intradayCandles.SPY.filter(c => new Date(c.datetime).getTime() >= scoredStartMs)
+
+  // --real-options: preload every 0DTE call/put strike each symbol could
+  // need each day (the day's real range, padded for OTM offsets) so the
+  // walk below can price synchronously.
+  let realPremiumSource: RealPremiumSource | null = null
+  if (realOptions) {
+    realPremiumSource = new RealPremiumSource(optionHaircut, 5)
+    const pad = 2 + Math.max(strikeOtmOffset ?? 0, divStrikeOtmOffset ?? 0)
+    const jobs: Array<{ symbol: Symbol; day: string; strikes: number[] }> = []
+    for (const symbol of SYMBOLS) {
+      const byDay = new Map<string, { lo: number; hi: number }>()
+      for (const c of intradayCandles[symbol]) {
+        if (new Date(c.datetime).getTime() < scoredStartMs) continue
+        const day = nyDateKey(c.datetime)
+        const r = byDay.get(day)
+        if (r) { r.lo = Math.min(r.lo, c.low); r.hi = Math.max(r.hi, c.high) } else byDay.set(day, { lo: c.low, hi: c.high })
+      }
+      for (const [day, r] of byDay) {
+        const strikes: number[] = []
+        for (let k = Math.floor(r.lo) - pad; k <= Math.ceil(r.hi) + pad; k++) strikes.push(k)
+        jobs.push({ symbol, day, strikes })
+      }
+    }
+    console.log(`Loading real option bars for ${jobs.length} symbol-days (cached after first run)...`)
+    let done = 0
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      for (let j = jobs.shift(); j; j = jobs.shift()) {
+        await realPremiumSource!.loadDay(j.symbol, j.day, j.strikes)
+        if (++done % 50 === 0) console.log(`  ${done} symbol-days loaded`)
+      }
+    }))
+    useRealPremiums(realPremiumSource)
+  }
 
   // --- Phase 1 state (ungated signal tracking) ---
   const legs: BacktestLeg[] = []
@@ -786,7 +831,7 @@ const main = async () => {
     const effectiveStrikeOtmOffset = (ttfStatus === 'DIV' && divStrikeOtmOffset !== undefined) ? divStrikeOtmOffset : (strikeOtmOffset ?? 0)
     const priced = priceEntry(direction, entryPrice, target50EMA, t, volWindow, {
       equity: simEquity, buyingPower, riskPct: SIM_RISK_PCT * riskPctMultiplier, minEquity: SIM_MIN_EQUITY, maxEquity: SIM_MAX_EQUITY
-    }, effectiveStrikeOtmOffset)
+    }, effectiveStrikeOtmOffset, symbol)
     if (!priced.ok) return skip(priced.reason)
 
     const entryCost = priced.contracts * priced.entryPremium * 100
@@ -1351,6 +1396,7 @@ const main = async () => {
   console.log(pnlRows.join('\n'))
 
   console.log(`\nTotal entries executed: ${executedPositions.length} | peak concurrent positions: ${peakConcurrentPositions}`)
+  if (realPremiumSource) console.log(`Real option entries: ${realPremiumSource.entriesFilled} filled, ${realPremiumSource.entriesNoTrade} skipped (no trade within 3 min of the signal)`)
   console.log(`Realized P&L: $${grandTotalPnl.toFixed(0)} | Final simulated equity: $${simEquity.toFixed(0)} (started at $${SIM_STARTING_EQUITY})`)
 
   console.log('\nEntries skipped by gate:')
@@ -1363,7 +1409,7 @@ const main = async () => {
   }
 
   const capTag = maxDailyCapitalBudget !== undefined ? `capUSD${maxDailyCapitalBudget}` : `cap${maxDailyEntries === Infinity ? 'none' : maxDailyEntries}`
-  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}${strikeOtmOffset !== undefined ? `_strikeotm${strikeOtmOffset}` : ''}${divStrikeOtmOffset !== undefined ? `_divstrikeotm${divStrikeOtmOffset}` : ''}`
+  const strategyTag = `hs${((hardStopPctOverride ?? 0.25) * 100).toFixed(0)}_${tierPlanLabel}_${capTag}${orbIntradayVwapGate ? '_orbvwap' : ''}${hardStopPctByType?.ORB ? `_orbstop${(hardStopPctByType.ORB * 100).toFixed(0)}` : ''}${dailyLossLimitPct !== undefined ? `_dll${(dailyLossLimitPct * 100).toFixed(0)}` : ''}${orbMinConfidenceOverride !== undefined ? `_orbconf${(orbMinConfidenceOverride * 100).toFixed(0)}` : ''}${divMinConfidenceOverride !== undefined ? `_divconf${(divMinConfidenceOverride * 100).toFixed(0)}` : ''}${quietOpenUntilMinutes !== undefined ? `_quiet${quietOpenUntilLabel.replace(':', '')}` : ''}${quarterHourConfidenceDiscount !== undefined ? `_qhdiscount${(quarterHourConfidenceDiscount * 100).toFixed(0)}` : ''}${quarterHourEntryFilterMinutes !== undefined ? `_qhfilter${quarterHourEntryFilterMinutes}` : ''}${orbQuarterHourDiscount !== undefined ? `_orbqhdiscount${(orbQuarterHourDiscount * 100).toFixed(0)}` : ''}${rebalanceCapitalPriority ? '_rebalance' : ''}${disabledTypes ? `_disable${[...disabledTypes].join('')}` : ''}${tttfCutoffMinutes !== undefined ? `_tttfcutoff${tttfCutoffMinutes}` : ''}${lastCallMinConfidence !== undefined ? `_lastcall${(lastCallMinConfidence * 100).toFixed(0)}` : ''}${divNoTrendModifier ? '_divnotrend' : ''}${mtfRsiModifier ? '_mtfrsi' : ''}${divAdxTrendGate !== undefined ? `_divadx${divAdxTrendGate}` : ''}${adxcMinAdx !== undefined ? `_adxc${adxcMinAdx}` : ''}${tttfMomentumResetGate ? '_tttfmomreset' : ''}${emabMinScore !== undefined ? `_emab${emabMinScore}` : ''}${pbcMinScore !== undefined ? `_pbc${pbcMinScore}` : ''}${divJointResetGate ? '_divjointreset' : ''}${remoraMinScore !== undefined ? `_rem${remoraMinScore}` : ''}${cciMinScore !== undefined ? `_cci${cciMinScore}_r${cciTargetRMultiple ?? 1}${cciRequireVolumeConfirmation ? '_vol' : ''}` : ''}${strikeOtmOffset !== undefined ? `_strikeotm${strikeOtmOffset}` : ''}${divStrikeOtmOffset !== undefined ? `_divstrikeotm${divStrikeOtmOffset}` : ''}${realOptions ? `_realopt${Math.round(optionHaircut * 100)}` : ''}`
 
   mkdirSync('backtest_out', { recursive: true })
   const outFile = `backtest_out/${start}_to_${end}_${strategyTag}.json`
