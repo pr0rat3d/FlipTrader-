@@ -110,7 +110,11 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
 // 07-17 disable rested on Black-Scholes premiums, which the 10-27 real-price
 // backtests showed were badly overstated - so this is a live paper test, not
 // a backtested change. Its 0.65 floor above applies.
-const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'TTTF', 'DTTF', 'PBC', 'REM'])
+// STTF disabled again the same day: its real-price backtest (0DTE, live
+// ladder, fixed sizing, 2024-10-23..2026-10-23) lost -$2,190 over 228 trades
+// (Y1 +$238 / Y2 -$2,428), with Y1 carried by a single quarter (2025Q2,
+// +$1,859) and 5 of the last 6 quarters negative.
+const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF', 'TTTF', 'DTTF', 'PBC', 'REM'])
 
 // DIV trend-day gate, shipped 2026-07-23 after a real incident: 10 straight
 // bullish DIV entries fired into a genuine gap-down-and-continue morning
