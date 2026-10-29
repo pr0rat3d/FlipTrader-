@@ -109,6 +109,11 @@ const appendReviewReason = (position: Position, note: string): string =>
     ? `${position.review_reason} | follow-up: ${note}`
     : note
 
+// A resting sell stop that can still protect the position - excludes orders
+// Alpaca's open-orders list still returns while they're being canceled.
+const isLiveSellStop = (o: { type: string; side: string; status: string }): boolean =>
+  o.type === 'stop' && o.side === 'sell' && !['pending_cancel', 'canceled', 'expired', 'rejected'].includes(o.status)
+
 const sellAtMarket = async (optionSymbol: string, qty: number, clientOrderId: string): Promise<{ orderId: string | null; failure: string | null }> => {
   try {
     const order = await placeOrder({ symbol: optionSymbol, qty, side: 'sell', type: 'market', timeInForce: 'day', clientOrderId })
@@ -337,7 +342,7 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           // position is really unprotected, ask Alpaca directly whether a
           // replacement stop already exists.
           const openOrders = await getOpenOrders(position.option_symbol)
-          const replacementStop = openOrders?.find(o => o.type === 'stop' && o.side === 'sell') ?? null
+          const replacementStop = openOrders?.find(o => isLiveSellStop(o) && o.id !== position.stop_order_id) ?? null
 
           if (replacementStop) {
             if (replacementStop.id !== position.stop_order_id) {
@@ -645,10 +650,18 @@ const runOnce = async (): Promise<{ managed: number; closed: number }> => {
           // own placeOrder outcome, before AND after attempting it) makes
           // this idempotent: whichever invocation actually created the stop,
           // we adopt it rather than risk overwriting it with null.
+          // 2026-10-29 fix: never adopt the stop we just canceled. Found live:
+          // the tier-1 fallback sell canceled the hard stop, then this lookup
+          // ran ~200ms later and Alpaca's open-orders list still returned that
+          // stop (pending_cancel / not yet out of the list) - so the ratchet
+          // "adopted" the dying order, placed nothing, and the position rode
+          // with no stop until the next poll found it canceled and flattened
+          // at market below the breakeven level.
           const optionSymbol = position.option_symbol
+          const canceledStopIds = new Set([position.stop_order_id, currentStopOrderId].filter((id): id is string => !!id))
           const findRestingStop = async () => {
             const openOrders = await getOpenOrders(optionSymbol)
-            return openOrders?.find(o => o.type === 'stop' && o.side === 'sell') ?? null
+            return openOrders?.find(o => isLiveSellStop(o) && !canceledStopIds.has(o.id)) ?? null
           }
 
           const preExistingStop = await findRestingStop()
