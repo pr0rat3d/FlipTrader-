@@ -105,7 +105,12 @@ const MIN_CONFIDENCE_BY_TYPE: Record<string, number> = {
 // -$283 vs -$1,395 at 90d, +$1,524 vs -$321 at 180d). Same shared-capital
 // lesson as ORB/IV above: full removal, not a tighter gate. Leaves DIV as
 // the only live type.
-const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'STTF', 'TTTF', 'DTTF', 'PBC', 'REM'])
+// STTF re-enabled 2026-10-29 at the user's request, after it fired 11 alerts
+// (confidence up to 0.73) on the 10-28 FOMC afternoon while DIV sat out. Its
+// 07-17 disable rested on Black-Scholes premiums, which the 10-27 real-price
+// backtests showed were badly overstated - so this is a live paper test, not
+// a backtested change. Its 0.65 floor above applies.
+const DISABLED_SIGNAL_TYPES = new Set(['ORB', 'IV', 'TTTF', 'DTTF', 'PBC', 'REM'])
 
 // DIV trend-day gate, shipped 2026-07-23 after a real incident: 10 straight
 // bullish DIV entries fired into a genuine gap-down-and-continue morning
